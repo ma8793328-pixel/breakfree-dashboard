@@ -1,0 +1,12 @@
+# Dependencies
+node_modules/
+
+# Secrets & generated keys — never commit
+server/.env
+server/data/
+
+# Build output (rebuilt on Render)
+client/dist/
+
+# Logs
+*.log

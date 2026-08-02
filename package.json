@@ -1,0 +1,16 @@
+{
+  "name": "breakfree",
+  "version": "1.0.0",
+  "private": true,
+  "description": "BreakFree — a warm, grounded companion for breaking any habit.",
+  "scripts": {
+    "dev": "concurrently -n server,client -c yellow,cyan \"npm --prefix server run dev\" \"npm --prefix client run dev\"",
+    "start": "concurrently -n server,client -c yellow,cyan \"npm --prefix server start\" \"npm --prefix client run preview\"",
+    "build": "npm --prefix client run build",
+    "lint": "npm --prefix client run lint",
+    "install:all": "npm --prefix server install && npm --prefix client install"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}

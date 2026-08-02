@@ -1,0 +1,32 @@
+# Render Blueprint — deploys the whole BreakFree app as one web service.
+# The API also serves the built client from client/dist (see server/index.js).
+#
+# First deploy:
+#   1. Push this repo to GitHub and connect it in Render.
+#   2. Blueprint auto-creates the service + persistent disk.
+#   3. Set the env vars below once (JWT_SECRET, ADMIN_EMAIL, ADMIN_PASSWORD).
+#      VAPID keys and the SQLite database persist on the disk automatically.
+services:
+  - type: web
+    name: breakfree
+    runtime: node
+    plan: starter
+    rootDir: server
+    buildCommand: npm install && cd ../client && npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: 22.13.0
+      - key: DATA_DIR
+        value: /var/data
+      - key: JWT_SECRET
+        generateValue: true
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+    disk:
+      name: breakfree-data
+      mountPath: /var/data
+      sizeGB: 1
