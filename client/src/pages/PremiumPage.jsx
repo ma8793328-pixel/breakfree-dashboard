@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useEffect, useState } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import Layout from '../components/Layout.jsx';
 import { useAuth } from '../auth.jsx';
 import { useSubscription } from '../subscription.jsx';
@@ -22,6 +22,30 @@ export default function PremiumPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [confirmStep, setConfirmStep] = useState(null);
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  // Returned from Stripe Checkout (success or cancel). Complete the session
+  // by verifying it on the server, then refresh subscription state.
+  useEffect(() => {
+    const checkout = searchParams.get('checkout');
+    if (checkout === 'success') {
+      const sessionId = searchParams.get('session_id');
+      setSearchParams({}, { replace: true });
+      if (sessionId) {
+        setBusy(true);
+        setError(null);
+        api('/subscription/complete', { method: 'POST', token, body: { sessionId } })
+          .then(() => refresh())
+          .catch((err) => setError(err.message))
+          .finally(() => setBusy(false));
+      } else {
+        refresh();
+      }
+    } else if (checkout === 'canceled') {
+      setSearchParams({}, { replace: true });
+      refresh();
+    }
+  }, [token, refresh, searchParams, setSearchParams]);
 
   async function startCheckout() {
     setBusy(true);
@@ -33,6 +57,11 @@ export default function PremiumPage() {
         return;
       }
       setConfirmStep(data.session);
+      if (data.session.url) {
+        // Real Stripe Checkout — send the user to Stripe's hosted page.
+        window.location.assign(data.session.url);
+        return;
+      }
     } catch (err) {
       setError(err.message);
     } finally {
@@ -159,10 +188,11 @@ export default function PremiumPage() {
         <div className="modal-backdrop" onClick={() => !busy && setConfirmStep(null)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
             <button className="modal-close" onClick={() => !busy && setConfirmStep(null)} aria-label="Close">✕</button>
-            <h3>Demo checkout</h3>
+            <h3>{confirmStep?.mode === 'demo' ? 'Demo checkout' : 'Checkout'}</h3>
             <p className="sub">
-              This is a simulated payment to keep the app self-contained. In production this is replaced by a real
-              Stripe checkout session.
+              {confirmStep?.mode === 'demo'
+                ? 'This is a simulated payment to keep the app self-contained — no card is charged. Tap Confirm to unlock Premium.'
+                : 'Redirecting to secure checkout... If the page doesn\'t open, tap unlock again.'}
             </p>
             <div className="card" style={{ background: 'var(--bg-soft)' }}>
               <div className="toggle-row" style={{ padding: '8px 0' }}>

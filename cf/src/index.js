@@ -7,6 +7,7 @@ import { hashPassword, verifyPassword, signToken, verifyToken, randomHex } from 
 import { registerAiRoutes } from './ai.js';
 import { buildReport, buildRecoveryPlan } from './premium.js';
 import { sendPush, loadOrCreateVapid } from './push.js';
+import { createCheckout, retrieveSession, cancelStripeSubscription, verifyWebhookSignature } from './stripe.js';
 import { findNearby, geocodeArea, GENERIC_IDEAS } from './daysout.js';
 
 const PRICE_CENTS = 499;
@@ -136,7 +137,21 @@ app.get('/api/auth/me', async (c) => {
   return c.json({ user: publicUser(user) });
 });
 
-// ---------- subscription (simulated checkout) ----------
+// ---------- subscription (Stripe checkout, with simulated fallback) ----------
+async function activateSubscription(env, userId, stripe) {
+  const customerId = stripe?.customer || null;
+  const subId = stripe?.subscription || null;
+  await env.DB.prepare(
+    `INSERT INTO subscriptions (user_id, plan, status, started_at, renews_at, stripe_customer_id, stripe_subscription_id)
+     VALUES (?, 'premium', 'active', datetime('now'), datetime('now', ?), ?, ?)
+     ON CONFLICT(user_id) DO UPDATE SET plan = 'premium', status = 'active', started_at = datetime('now'), renews_at = datetime('now', ?), stripe_customer_id = coalesce(?, stripe_customer_id), stripe_subscription_id = coalesce(?, stripe_subscription_id)`
+  ).bind(userId, `+${BILLING_DAYS} days`, customerId, subId, `+${BILLING_DAYS} days`, customerId, subId).run();
+}
+
+function stripeConfigured(env) {
+  return Boolean(env.STRIPE_SECRET_KEY);
+}
+
 app.get('/api/subscription', async (c) => {
   const u = userOf(c);
   if (!u) return c.json({ error: 'Not authenticated' }, 401);
@@ -159,31 +174,87 @@ app.post('/api/subscription/checkout', async (c) => {
   const u = userOf(c);
   if (!u) return c.json({ error: 'Not authenticated' }, 401);
   if (await isPremium(c.env, u.id)) return c.json({ alreadyPremium: true, sessionId: null, priceCents: PRICE_CENTS });
+  if (stripeConfigured(c.env)) {
+    try {
+      const user = await c.env.DB.prepare('SELECT email FROM users WHERE id = ?').bind(u.id).first();
+      const origin = new URL(c.req.url).origin;
+      const session = await createCheckout(c.env, { userId: u.id, email: user?.email, origin });
+      return c.json({ session: { ...session, mode: 'stripe' } });
+    } catch (e) {
+      return c.json({ error: String(e.message || 'Stripe checkout unavailable.') }, 502);
+    }
+  }
+  // Simulated fallback (no STRIPE_SECRET_KEY configured).
   const sessionId = randomHex(16);
   await c.env.DB.prepare('INSERT INTO checkout_sessions (id, user_id, price_cents, status) VALUES (?, ?, ?, ?)').bind(sessionId, u.id, PRICE_CENTS, 'pending').run();
-  return c.json({ session: { id: sessionId, priceCents: PRICE_CENTS, currency: 'usd' } });
+  return c.json({ session: { id: sessionId, priceCents: PRICE_CENTS, currency: 'usd', mode: 'demo' } });
 });
 
 app.post('/api/subscription/complete', async (c) => {
   const u = userOf(c);
   if (!u) return c.json({ error: 'Not authenticated' }, 401);
   const { sessionId } = await c.req.json().catch(() => ({}));
-  const session = await c.env.DB.prepare('SELECT * FROM checkout_sessions WHERE id = ? AND user_id = ?').bind(String(sessionId || ''), u.id).first();
+  if (!sessionId || !String(sessionId).trim()) return c.json({ error: 'Missing session ID.' }, 400);
+
+  if (stripeConfigured(c.env)) {
+    // Verify the payment actually completed on Stripe before granting Premium.
+    try {
+      const s = await retrieveSession(c.env, String(sessionId));
+      if (s.payment_status !== 'paid') return c.json({ error: 'Payment has not completed yet.' }, 400);
+      if (s.client_reference_id !== String(u.id)) return c.json({ error: 'Session does not match this account.' }, 403);
+      await activateSubscription(c.env, u.id, s);
+      return c.json({ ok: true });
+    } catch (e) {
+      return c.json({ error: String(e.message || 'Could not verify the payment.') }, 502);
+    }
+  }
+
+  const session = await c.env.DB.prepare('SELECT * FROM checkout_sessions WHERE id = ? AND user_id = ?').bind(String(sessionId), u.id).first();
   if (!session) return c.json({ error: 'Checkout session not found.' }, 400);
   if (session.status !== 'pending') return c.json({ error: 'Checkout session is not pending.' }, 400);
   await c.env.DB.prepare("UPDATE checkout_sessions SET status = 'completed', completed_at = datetime('now') WHERE id = ?").bind(session.id).run();
-  await c.env.DB.prepare(
-    `INSERT INTO subscriptions (user_id, plan, status, started_at, renews_at) VALUES (?, 'premium', 'active', datetime('now'), datetime('now', ?))
-     ON CONFLICT(user_id) DO UPDATE SET plan = 'premium', status = 'active', started_at = datetime('now'), renews_at = datetime('now', ?)`
-  ).bind(u.id, `+${BILLING_DAYS} days`, `+${BILLING_DAYS} days`).run();
+  await activateSubscription(c.env, u.id, null);
   return c.json({ ok: true });
 });
 
 app.post('/api/subscription/cancel', async (c) => {
   const u = userOf(c);
   if (!u) return c.json({ error: 'Not authenticated' }, 401);
+  if (stripeConfigured(c.env)) {
+    const row = await c.env.DB.prepare('SELECT stripe_subscription_id FROM subscriptions WHERE user_id = ? AND plan = ? AND status = ?').bind(u.id, 'premium', 'active').first();
+    if (row?.stripe_subscription_id) await cancelStripeSubscription(c.env, row.stripe_subscription_id);
+  }
   await c.env.DB.prepare("UPDATE subscriptions SET status = 'cancelled' WHERE user_id = ? AND plan = 'premium'").bind(u.id).run();
   return c.json({ ok: true });
+});
+
+// Stripe webhook: activate on checkout completion, downgrade on cancel.
+app.post('/api/stripe/webhook', async (c) => {
+  const rawBody = await c.req.text();
+  const sig = c.req.header('stripe-signature');
+  const okSig = await verifyWebhookSignature(c.env, rawBody, sig);
+  if (!okSig) return c.json({ error: 'Invalid signature.' }, 400);
+  const event = JSON.parse(rawBody);
+  try {
+    if (event.type === 'checkout.session.completed') {
+      const s = event.data.object;
+      const userId = Number(s.client_reference_id);
+      if (userId && s.payment_status === 'paid') {
+        await activateSubscription(c.env, userId, { customer: s.customer, subscription: s.subscription });
+      }
+    } else if (event.type === 'customer.subscription.deleted') {
+      const sub = event.data.object;
+      if (sub?.metadata?.user_id) {
+        const uid = Number(sub.metadata.user_id);
+        await c.env.DB.prepare("UPDATE subscriptions SET status = 'cancelled' WHERE user_id = ?").bind(uid).run();
+      } else {
+        await c.env.DB.prepare('UPDATE subscriptions SET status = ? WHERE stripe_subscription_id = ?').bind('cancelled', sub.id).run();
+      }
+    }
+  } catch (e) {
+    console.error('webhook handler failed:', e.message);
+  }
+  return c.json({ received: true });
 });
 
 // ---------- habits ----------
