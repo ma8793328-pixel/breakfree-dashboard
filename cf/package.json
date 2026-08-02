@@ -1,0 +1,24 @@
+{
+  "name": "cf",
+  "version": "1.0.0",
+  "description": "",
+  "main": "src/index.js",
+  "scripts": {
+    "dev": "wrangler dev --port 8787",
+    "deploy": "wrangler deploy",
+    "d1:migrate": "wrangler d1 execute breakfree --file=./migrations/0001_init.sql --remote",
+    "d1:local": "wrangler d1 execute breakfree --local --file=./migrations/0001_init.sql",
+    "typecheck": "node --check src/index.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "hono": "^4.12.33",
+    "jose": "^6.2.7"
+  },
+  "devDependencies": {
+    "wrangler": "^4.118.0"
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "breakfree",
+  "main": "src/index.js",
+  "compatibility_date": "2025-04-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "assets": {
+    "directory": "../client/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "breakfree",
+      "database_id": "7e2db807-9118-4b09-94da-964d1afb7ec2",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "vars": {
+    "ADMIN_EMAIL": "admin@breakfree.app"
+  }
+}
