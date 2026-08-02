@@ -16,7 +16,8 @@ function encodeForm(obj) {
 }
 
 export async function stripeRequest(env, method, path, form) {
-  const key = env.STRIPE_SECRET_KEY;
+  // Strip any accidental whitespace/newline added by a saved secret.
+  const key = String(env.STRIPE_SECRET_KEY || '').replace(/\s+/g, '');
   if (!key) throw new Error('Stripe is not configured (STRIPE_SECRET_KEY).');
   const res = await fetch(`${STRIPE_API}${path}`, {
     method,
@@ -39,7 +40,7 @@ export async function createCheckout(env, { userId, email, origin }) {
     'line_items[0][quantity]': 1,
     'line_items[0][price_data][currency]': 'usd',
     'line_items[0][price_data][unit_amount]': PRICE_CENTS,
-    'line_items[0][price_data][product][name]': 'BreakFree Premium',
+    'line_items[0][price_data][product_data][name]': 'BreakFree Premium',
     'line_items[0][price_data][recurring][interval]': 'month',
     client_reference_id: String(userId),
     customer_email: email,
