@@ -973,6 +973,8 @@ app.post('/api/community/moderation/:id', async (c) => {
     await c.env.DB.prepare(
       "UPDATE community_reports SET status = 'resolved', action = 'dismiss', resolved_at = datetime('now'), resolved_by = ? WHERE id = ?"
     ).bind(u.id, report.id).run();
+    const remainingOpen = Number((await c.env.DB.prepare("SELECT COUNT(*) AS n FROM community_reports WHERE status = 'open'").first())?.n || 0);
+    void sendWebhookAlert(c.env, 'report_resolved', { reportId: report.id, action: 'dismiss', remainingOpen });
     return c.json({ ok: true, action });
   }
   if (action === 'remove') {
@@ -986,6 +988,8 @@ app.post('/api/community/moderation/:id', async (c) => {
     await c.env.DB.prepare(
       "UPDATE community_reports SET status = 'resolved', action = 'remove', resolved_at = datetime('now'), resolved_by = ? WHERE id = ?"
     ).bind(u.id, report.id).run();
+    const remainingOpen = Number((await c.env.DB.prepare("SELECT COUNT(*) AS n FROM community_reports WHERE status = 'open'").first())?.n || 0);
+    void sendWebhookAlert(c.env, 'report_resolved', { reportId: report.id, action: 'remove', remainingOpen });
     return c.json({ ok: true, action });
   }
   const targetUserId = report.post_id
@@ -1004,6 +1008,8 @@ app.post('/api/community/moderation/:id', async (c) => {
   await c.env.DB.prepare(
     "UPDATE community_reports SET status = 'resolved', action = 'block', resolved_at = datetime('now'), resolved_by = ? WHERE id = ?"
   ).bind(u.id, report.id).run();
+  const remainingOpen = Number((await c.env.DB.prepare("SELECT COUNT(*) AS n FROM community_reports WHERE status = 'open'").first())?.n || 0);
+  void sendWebhookAlert(c.env, 'report_resolved', { reportId: report.id, action: 'block', remainingOpen });
   return c.json({ ok: true, action });
 });
 
@@ -1295,9 +1301,29 @@ app.get('/api/admin/status', async (c) => {
   const today = new Date().toISOString().slice(0, 10);
   const todayCheckins = Number((await c.env.DB.prepare('SELECT COUNT(*) AS n FROM checkins WHERE date = ?').bind(today).first())?.n || 0);
   const todayUrges = Number((await c.env.DB.prepare('SELECT COUNT(*) AS n FROM urges WHERE date(logged_at) = ?').bind(today).first())?.n || 0);
+  const yesterday = addDays(todayKey(), -1);
+  const streakRiskUsers = (await c.env.DB.prepare(
+    `SELECT u.id, u.email, h.name AS habit, h.start_date, COALESCE(c.streak_days, 0) AS streak_days
+     FROM habits h
+     JOIN users u ON u.id = h.user_id
+     LEFT JOIN (
+       SELECT habit_id, COUNT(*) AS streak_days
+       FROM checkins
+       WHERE status = 'clean' AND date >= ?
+       GROUP BY habit_id
+     ) c ON c.habit_id = h.id
+     WHERE NOT EXISTS (SELECT 1 FROM checkins c2 WHERE c2.habit_id = h.id AND c2.date IN (?, ?))
+     LIMIT 10`
+  ).bind(addDays(today, -3), today, yesterday).all()).results;
+  const journalToday = Number((await c.env.DB.prepare('SELECT COUNT(DISTINCT habit_id) AS n FROM journals WHERE date = ?').bind(today).first())?.n || 0);
+  const cleanToday = Number((await c.env.DB.prepare('SELECT COUNT(DISTINCT habit_id) AS n FROM checkins WHERE date = ? AND status = ?').bind(today, 'clean').first())?.n || 0);
+  const journalCorrelation = journalToday > 0 && cleanToday > 0 ? `${Math.round((journalToday / Math.max(1, cleanToday)) * 100)}% of today's clean check-ins also have a journal entry` : 'Not enough data yet';
   const communityPosts = Number((await c.env.DB.prepare('SELECT COUNT(*) AS n FROM community_posts').first())?.n || 0);
   const communityComments = Number((await c.env.DB.prepare('SELECT COUNT(*) AS n FROM community_comments').first())?.n || 0);
   const openReports = Number((await c.env.DB.prepare("SELECT COUNT(*) AS n FROM community_reports WHERE status = 'open'").first())?.n || 0);
+  if (openReports > 0) {
+    void sendWebhookAlert(c.env, 'open_reports', { count: openReports });
+  }
   const notifications = {
     lastRun: metaRows.nudges_last_run || null,
     lastSent: metaRows.nudges_last_sent || null,
@@ -1318,6 +1344,11 @@ app.get('/api/admin/status', async (c) => {
     today: { checkins: todayCheckins, urges: todayUrges },
     community: { posts: communityPosts, comments: communityComments, openReports },
     server: { healthy: serverHealthy, status: serverHealthy ? 'healthy' : 'degraded' },
+    insights: {
+      streakRisk: streakRiskUsers.length > 0 ? streakRiskUsers : null,
+      streakRiskCount: streakRiskUsers.length,
+      journalCorrelation,
+    },
   });
 });
 
@@ -1326,7 +1357,18 @@ app.get('/api/admin/errors', async (c) => {
   if (!u) return c.json({ error: 'Not authenticated' }, 401);
   if (u.role !== 'admin') return c.json({ error: 'Admin access required.' }, 403);
   const errors = (await c.env.DB.prepare('SELECT id, message, url, created_at FROM app_errors ORDER BY id DESC LIMIT 50').all()).results;
-  return c.json({ errors });
+  const groups = new Map();
+  for (const e of errors) {
+    const key = e.message || 'Unknown';
+    const existing = groups.get(key);
+    if (existing) {
+      existing.count += 1;
+      existing.lastAt = e.created_at;
+    } else {
+      groups.set(key, { message: key, url: e.url, count: 1, lastAt: e.created_at });
+    }
+  }
+  return c.json({ errors, groups: [...groups.values()].sort((a, b) => b.count - a.count) });
 });
 
 app.post('/api/admin/clear-errors', async (c) => {
@@ -1336,8 +1378,90 @@ app.post('/api/admin/clear-errors', async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const olderThan = body.olderThan ? ` AND created_at < datetime('now', '-${Math.max(1, Number(body.olderThan) || 24)} hours')` : '';
   const res = await c.env.DB.prepare(`DELETE FROM app_errors WHERE 1=1${olderThan}`).run();
+  if (res.changes > 0) {
+    await c.env.DB.prepare('INSERT INTO admin_audit_log (admin_id, action, detail) VALUES (?, ?, ?)').bind(u.id, 'clear_errors', `Deleted ${res.changes} error(s)${olderThan ? ' older than ' + body.olderThan + 'h' : ''}`);
+    const recentOpen = Number((await c.env.DB.prepare("SELECT COUNT(*) AS n FROM community_reports WHERE status = 'open'").first())?.n || 0);
+    void sendWebhookAlert(c.env, 'errors_cleared', { deleted: res.changes, errors24h, openReports: recentOpen });
+  }
   return c.json({ deleted: res.changes });
 });
+
+app.get('/api/admin/audit-log', async (c) => {
+  const u = userOf(c);
+  if (!u) return c.json({ error: 'Not authenticated' }, 401);
+  if (u.role !== 'admin') return c.json({ error: 'Admin access required.' }, 403);
+  const limit = Math.min(100, Math.max(1, Number(c.req.query('limit')) || 20));
+  const rows = (await c.env.DB.prepare('SELECT al.id, al.action, al.detail, al.created_at, u.email AS admin_email FROM admin_audit_log al LEFT JOIN users u ON u.id = al.admin_id ORDER BY al.id DESC LIMIT ?').bind(limit).all()).results;
+  return c.json({ entries: rows });
+});
+
+app.get('/api/admin/webhooks', async (c) => {
+  const u = userOf(c);
+  if (!u) return c.json({ error: 'Not authenticated' }, 401);
+  if (u.role !== 'admin') return c.json({ error: 'Admin access required.' }, 403);
+  const rows = (await c.env.DB.prepare('SELECT id, url, label, events, active, created_at FROM admin_webhooks ORDER BY id DESC').all()).results;
+  return c.json({ webhooks: rows });
+});
+
+app.post('/api/admin/webhooks', async (c) => {
+  const u = userOf(c);
+  if (!u) return c.json({ error: 'Not authenticated' }, 401);
+  if (u.role !== 'admin') return c.json({ error: 'Admin access required.' }, 403);
+  const body = await c.req.json().catch(() => ({}));
+  const url = (body.url || '').trim();
+  const label = (body.label || '').trim();
+  const events = (body.events || 'server_degraded,open_reports').trim();
+  if (!url || !/^https?:\/\//i.test(url)) return c.json({ error: 'A valid webhook URL is required (http:// or https://).' }, 400);
+  const res = await c.env.DB.prepare('INSERT INTO admin_webhooks (url, label, events, active) VALUES (?, ?, ?, 1)').bind(url, label || 'Webhook', events).run();
+  await c.env.DB.prepare('INSERT INTO admin_audit_log (admin_id, action, detail) VALUES (?, ?, ?)').bind(u.id, 'webhook_create', `Created webhook id=${res.meta.last_row_id} url=${url}`);
+  return c.json({ ok: true, id: res.meta.last_row_id });
+});
+
+app.post('/api/admin/webhooks/:id/toggle', async (c) => {
+  const u = userOf(c);
+  if (!u) return c.json({ error: 'Not authenticated' }, 401);
+  if (u.role !== 'admin') return c.json({ error: 'Admin access required.' }, 403);
+  const id = Number(c.req.param('id'));
+  const row = await c.env.DB.prepare('SELECT id, active FROM admin_webhooks WHERE id = ?').bind(id).first();
+  if (!row) return c.json({ error: 'Webhook not found.' }, 404);
+  const next = row.active ? 0 : 1;
+  await c.env.DB.prepare('UPDATE admin_webhooks SET active = ? WHERE id = ?').bind(next, id);
+  await c.env.DB.prepare('INSERT INTO admin_audit_log (admin_id, action, detail) VALUES (?, ?, ?)').bind(u.id, 'webhook_toggle', `Toggled webhook id=${id} active=${next}`);
+  return c.json({ ok: true, active: next });
+});
+
+app.delete('/api/admin/webhooks/:id', async (c) => {
+  const u = userOf(c);
+  if (!u) return c.json({ error: 'Not authenticated' }, 401);
+  if (u.role !== 'admin') return c.json({ error: 'Admin access required.' }, 403);
+  const id = Number(c.req.param('id'));
+  const res = await c.env.DB.prepare('DELETE FROM admin_webhooks WHERE id = ?').bind(id).run();
+  if (res.changes === 0) return c.json({ error: 'Webhook not found.' }, 404);
+  await c.env.DB.prepare('INSERT INTO admin_audit_log (admin_id, action, detail) VALUES (?, ?, ?)').bind(u.id, 'webhook_delete', `Deleted webhook id=${id}`);
+  return c.json({ ok: true });
+});
+
+async function sendWebhookAlert(env, event, payload) {
+  try {
+    const rows = (await env.DB.prepare('SELECT id, url, events FROM admin_webhooks WHERE active = 1').all()).results;
+    for (const w of rows) {
+      const events = (w.events || '').split(',').map((s) => s.trim()).filter(Boolean);
+      if (!events.includes(event)) continue;
+      try {
+        await fetch(w.url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: `[BreakFree ${event}] ${JSON.stringify(payload)}` }),
+          signal: AbortSignal.timeout(8000),
+        });
+      } catch {
+        // swallow per-webhook failures — alerting must not break the request
+      }
+    }
+  } catch {
+    // ignore webhook dispatch errors
+  }
+}
 
 app.post('/api/admin/ai-check', async (c) => {
   const u = userOf(c);
@@ -1367,6 +1491,10 @@ app.post('/api/admin/ai-check', async (c) => {
   const aiCheck = await checkOpenAI(c.env);
   checks.push({ name: 'AI model (OpenAI)', ok: aiCheck.ok, detail: aiCheck.detail });
   const healthy = checks.every((x) => x.ok);
+  if (!healthy) {
+    const failed = checks.filter((x) => !x.ok).map((x) => x.name).join(', ');
+    void sendWebhookAlert(c.env, 'ai_check_failed', { failedChecks: failed, summary: 'AI health check failed' });
+  }
   return c.json({ healthy, checks, summary: healthy ? 'All checks passed.' : 'Some checks failed.', suggestions: [] });
 });
 
