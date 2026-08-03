@@ -184,6 +184,8 @@ app.use('/api/auth*', async (c, next) => {
   await next();
 });
 
+// Remove per-route rate limits once global middleware is confirmed working.
+
 function parseTriggerTimes(raw) {
   try {
     const arr = JSON.parse(raw || '[]');
