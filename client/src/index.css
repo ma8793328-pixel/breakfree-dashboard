@@ -1808,15 +1808,6 @@ a {
   background: var(--card-2);
 }
 
-.menu-item-exit {
-  color: #f59e0b !important;
-  font-weight: 800 !important;
-}
-
-.menu-item-exit:hover {
-  background: rgba(245, 158, 11, 0.12) !important;
-}
-
 .quick-exit-btn {
   flex: 1;
   display: flex;
