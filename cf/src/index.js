@@ -1332,6 +1332,13 @@ app.get('/api/admin/status', async (c) => {
     const count = Number((await c.env.DB.prepare('SELECT COUNT(*) AS n FROM app_errors WHERE date(created_at) = ?').bind(d).first())?.n || 0);
     errorTrend.push({ date: d, label: dayLabel, count });
   }
+  const todayErrors = errorTrend[errorTrend.length - 1]?.count || 0;
+  const avgErrors = errorTrend.length > 0 ? Math.round(errorTrend.reduce((s, t) => s + t.count, 0) / errorTrend.length) : 0;
+  if (todayErrors >= 3 && avgErrors > 0 && todayErrors >= avgErrors * 3) {
+    void sendWebhookAlert(c.env, 'error_spike', { todayErrors, avgErrors, multiplier: Math.round(todayErrors / avgErrors) });
+  } else if (todayErrors >= 5 && avgErrors === 0) {
+    void sendWebhookAlert(c.env, 'error_spike', { todayErrors, avgErrors: 0, multiplier: todayErrors });
+  }
   const notifications = {
     lastRun: metaRows.nudges_last_run || null,
     lastSent: metaRows.nudges_last_sent || null,
@@ -1393,6 +1400,66 @@ app.post('/api/admin/clear-errors', async (c) => {
     void sendWebhookAlert(c.env, 'errors_cleared', { deleted: res.changes, errors24h, openReports: recentOpen });
   }
   return c.json({ deleted: res.changes });
+});
+
+app.post('/api/admin/trigger-nudges', async (c) => {
+  const u = userOf(c);
+  if (!u) return c.json({ error: 'Not authenticated' }, 401);
+  if (u.role !== 'admin') return c.json({ error: 'Admin access required.' }, 403);
+  const body = await c.req.json().catch(() => ({}));
+  const targetUserId = body.userId ? Number(body.userId) : null;
+  if (targetUserId) {
+    const user = await c.env.DB.prepare('SELECT id, notification_prefs, timezone FROM users WHERE id = ?').bind(targetUserId).first();
+    if (!user) return c.json({ error: 'User not found.' }, 404);
+    const habits = (await c.env.DB.prepare('SELECT id, name, trigger_times FROM habits WHERE user_id = ?').bind(targetUserId).all()).results;
+    if (!habits.length) return c.json({ error: 'User has no habits to nudge about.' }, 400);
+    const subs = (await c.env.DB.prepare('SELECT endpoint, p256dh, auth FROM push_subscriptions WHERE user_id = ?').bind(targetUserId).all()).results;
+    if (!subs.length) return c.json({ error: 'User has no push subscriptions.' }, 400);
+    const prefs = { ...DEFAULT_PREFS };
+    if (user.notification_prefs) Object.assign(prefs, JSON.parse(user.notification_prefs));
+    const best = habits[0];
+    const stats = computeStats((await c.env.DB.prepare('SELECT date, status, forgiven FROM checkins WHERE habit_id = ?').bind(best.id).all()).results, 0, 0, Number(best.units_per_day) || 0);
+    const streakBit = stats.currentStreak > 0 ? ` You're ${stats.currentStreak} days in.` : '';
+    const body_text = `Hey, it's been a while. Your habit "${best.name}" needs you.${streakBit} Open the app and check in now. 💪`;
+    let sent = 0;
+    for (const s of subs) {
+      try {
+        await sendPush(c.env, s, { title: 'BreakFree check-in', body: body_text, habitId: best.id, url: '/app?action=checkin' });
+        sent += 1;
+      } catch {
+        // skip stale subscriptions
+      }
+    }
+    await c.env.DB.prepare('INSERT INTO admin_audit_log (admin_id, action, detail) VALUES (?, ?, ?)').bind(u.id, 'trigger_nudge', `Sent ${sent} nudge(s) to user ${targetUserId} (${user.id})`);
+    return c.json({ ok: true, sent, user: targetUserId });
+  }
+  const subs = (await c.env.DB.prepare('SELECT p.user_id, u.notification_prefs, u.timezone FROM push_subscriptions p JOIN users u ON u.id = p.user_id').all()).results;
+  const seen = new Set();
+  let totalSent = 0;
+  for (const sub of subs) {
+    if (seen.has(sub.user_id)) continue;
+    seen.add(sub.user_id);
+    const habits = (await c.env.DB.prepare('SELECT id, name FROM habits WHERE user_id = ?').bind(sub.user_id).all()).results;
+    if (!habits.length) continue;
+    const userSubs = (await c.env.DB.prepare('SELECT endpoint, p256dh, auth FROM push_subscriptions WHERE user_id = ?').bind(sub.user_id).all()).results;
+    const prefs = { ...DEFAULT_PREFS };
+    if (sub.notification_prefs) Object.assign(prefs, JSON.parse(sub.notification_prefs));
+    if (prefs.dailyReminder === false) continue;
+    const best = habits[0];
+    const body_text = 'Hey, it\'s time for your check-in. One day at a time — you\'ve got this. 💪';
+    let sent = 0;
+    for (const s of userSubs) {
+      try {
+        await sendPush(c.env, s, { title: 'BreakFree check-in', body: body_text, habitId: best.id, url: '/app?action=checkin' });
+        sent += 1;
+      } catch {
+        // skip
+      }
+    }
+    totalSent += sent;
+  }
+  await c.env.DB.prepare('INSERT INTO admin_audit_log (admin_id, action, detail) VALUES (?, ?, ?)').bind(u.id, 'trigger_nudge', `Broadcast nudge to ${seen.size} user(s), ${totalSent} push(es) sent`);
+  return c.json({ ok: true, users: seen.size, totalSent });
 });
 
 app.get('/api/admin/audit-log', async (c) => {

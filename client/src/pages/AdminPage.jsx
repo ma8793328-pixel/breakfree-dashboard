@@ -87,6 +87,8 @@ export default function AdminPage() {
   const [webhookForm, setWebhookForm] = useState({ url: '', label: '', events: 'server_degraded,open_reports' });
   const [webhookBusy, setWebhookBusy] = useState(false);
   const [showResolved, setShowResolved] = useState(false);
+  const [nudgeBusy, setNudgeBusy] = useState(false);
+  const [nudgeTarget, setNudgeTarget] = useState('');
 
   const loadStatus = useCallback(async () => {
     try {
@@ -185,6 +187,20 @@ export default function AdminPage() {
       setAi({ healthy: false, summary: e.message, checks: [], suggestions: [] });
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function triggerNudges() {
+    setNudgeBusy(true);
+    try {
+      const body = nudgeTarget ? { userId: Number(nudgeTarget) } : {};
+      const d = await api('/admin/trigger-nudges', { method: 'POST', token, body });
+      alert(d.ok ? `Nudges sent: ${d.sent || d.totalSent} push(es) to ${d.user || d.users} user(s)` : `Failed: ${JSON.stringify(d)}`);
+      await loadAuditLog();
+    } catch (e) {
+      alert(e.message);
+    } finally {
+      setNudgeBusy(false);
     }
   }
 
@@ -369,6 +385,23 @@ export default function AdminPage() {
             🧪 Test push notification
           </button>
         </div>
+        <div className="row" style={{ flexWrap: 'wrap', gap: 10, marginTop: 10 }}>
+          <input
+            className="field"
+            style={{ flex: 1, minWidth: 120, margin: 0 }}
+            placeholder="User ID (optional — leave blank for all)"
+            type="number"
+            min="1"
+            value={nudgeTarget}
+            onChange={(e) => setNudgeTarget(e.target.value)}
+          />
+          <button className="btn btn-primary btn-sm" onClick={triggerNudges} disabled={nudgeBusy}>
+            {nudgeBusy ? 'Sending...' : '📢 Trigger nudges'}
+          </button>
+        </div>
+        <p className="muted small" style={{ marginTop: 6 }}>
+          Sends a check-in nudge to all subscribed users, or a specific user by ID. Requires push subscriptions.
+        </p>
       </div>
 
       <div className="card">

@@ -54,7 +54,7 @@ function ScalePicker({ label, value, onChange, lowEnd = 'Low', highEnd = 'High' 
 export default function Dashboard() {
   const { token, user, logout } = useAuth();
   const { habits, active, loading, refresh, select, upsertHabit } = useHabits();
-  const { supported: pushSupported, status: pushStatus, error: pushError } = usePushNotifications(token);
+  const { supported: pushSupported, status: pushStatus, error: pushError, subscribe } = usePushNotifications(token);
   const navigate = useNavigate();
 
   const [flow, setFlow] = useState(null);
@@ -67,6 +67,7 @@ export default function Dashboard() {
   const [recoveryBusy, setRecoveryBusy] = useState(false);
   const [overrideToday, setOverrideToday] = useState(false);
   const [lastJournal, setLastJournal] = useState(null);
+  const [journalWeekCount, setJournalWeekCount] = useState(0);
   const [todayUrgeCount, setTodayUrgeCount] = useState(0);
   const [urgePeak, setUrgePeak] = useState(null);
   const [totalUrges, setTotalUrges] = useState(0);
@@ -83,6 +84,9 @@ export default function Dashboard() {
   const [isOnline, setIsOnline] = useState(typeof navigator !== 'undefined' ? navigator.onLine : true);
   const wellnessRef = useRef(null);
   const [welcomeHabit, setWelcomeHabit] = useState(null);
+  const [pushOptInDismissed, setPushOptInDismissed] = useState(() => {
+    try { return localStorage.getItem('bf_push_optin_dismissed') === '1'; } catch { return false; }
+  });
 
   useEffect(() => {
     const loc = window.location;
@@ -183,7 +187,12 @@ export default function Dashboard() {
     let cancelled = false;
     api(`/habits/${active.id}/journals`, { token })
       .then((data) => {
-        if (!cancelled && data.journals?.length > 0) setLastJournal(data.journals[0]);
+        if (!cancelled) {
+          if (data.journals?.length > 0) setLastJournal(data.journals[0]);
+          const weekAgo = new Date(); weekAgo.setDate(weekAgo.getDate() - 7);
+          const weekKey = weekAgo.toISOString().slice(0, 10);
+          setJournalWeekCount((data.journals || []).filter((j) => j.date >= weekKey).length);
+        }
       })
       .catch(() => {});
     api(`/habits/${active.id}/urges`, { token })
@@ -420,6 +429,25 @@ export default function Dashboard() {
           fontSize: 14,
         }}>
           📴 You're offline — check-ins and journal entries will sync when you reconnect.
+        </div>
+      )}
+      {pushSupported && pushStatus !== 'granted' && !pushOptInDismissed && (
+        <div className="card" style={{ borderColor: 'rgba(168,192,154,0.35)', marginBottom: 16 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <span style={{ fontSize: 28 }}>🔔</span>
+            <div style={{ flex: 1 }}>
+              <p style={{ fontWeight: 700, margin: 0, fontSize: 15 }}>Stay on track with nudges</p>
+              <p className="muted small" style={{ marginTop: 2 }}>
+                Enable notifications to get gentle reminders during your trigger windows and milestone celebrations.
+              </p>
+            </div>
+            <button className="btn btn-ghost btn-sm" onClick={async () => { const ok = await subscribe?.(); if (ok) setPushOptInDismissed(true); }}>
+              Enable
+            </button>
+            <button className="btn btn-ghost btn-sm" onClick={() => { setPushOptInDismissed(true); try { localStorage.setItem('bf_push_optin_dismissed', '1'); } catch {} }} style={{ color: 'var(--muted-2)' }}>
+              Later
+            </button>
+          </div>
         </div>
       )}
       <section className="hero">
@@ -869,6 +897,25 @@ export default function Dashboard() {
           Chat
         </button>
       </div>
+
+      {journalWeekCount < 3 && streak >= 3 && (
+        <div className="card" style={{ borderColor: 'rgba(168,192,154,0.35)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <span style={{ fontSize: 28 }}>📝</span>
+            <div style={{ flex: 1 }}>
+              <p style={{ fontWeight: 700, margin: 0, fontSize: 15 }}>Journal 3× this week</p>
+              <p className="muted small" style={{ marginTop: 2 }}>
+                {journalWeekCount === 0
+                  ? 'No journal entries yet this week. Writing for 2 minutes helps you spot patterns and stay grounded.'
+                  : `${journalWeekCount} this week — one more and you hit your goal.`}
+              </p>
+            </div>
+            <button className="btn btn-ghost btn-sm" onClick={() => navigate('/app/journal')}>
+              Write now
+            </button>
+          </div>
+        </div>
+      )}
 
       <div className="card">
         <p className="card-title">Milestones</p>
