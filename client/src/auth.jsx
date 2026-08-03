@@ -51,6 +51,7 @@ export function AuthProvider({ children }) {
   }
 
   function logout() {
+    fetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
     localStorage.removeItem('bf_token');
     localStorage.removeItem('bf_user');
     setToken(null);

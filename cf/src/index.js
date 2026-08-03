@@ -11,6 +11,7 @@ import { createCheckout, retrieveSession, cancelStripeSubscription, verifyWebhoo
 import { findNearby, geocodeArea, GENERIC_IDEAS } from './daysout.js';
 import { evaluateUserEngagement, evaluateAllEngagement } from './engage.js';
 import { checkHealth as checkOpenAI } from './openai.js';
+import { sendEmail } from './mail.js';
 
 // The "Day 3–7 wall": a high-support window where survival-mode messaging and
 // extra nudges kick in. After day 7 the worst of acute withdrawal is behind.
@@ -281,6 +282,11 @@ app.post('/api/auth/login', async (c) => {
   return c.json({ token, user: publicUser(user), expiresIn: expiresSec });
 });
 
+app.post('/api/auth/logout', async (c) => {
+  c.header('Set-Cookie', 'bf_auth=; HttpOnly; Secure; SameSite=Strict; Max-Age=0; Path=/');
+  return c.json({ message: 'Logged out.' });
+});
+
 app.post('/api/auth/forgot-password', async (c) => {
   const { email } = await c.req.json().catch(() => ({}));
   if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return c.json({ error: 'Please enter a valid email address.' }, 400);
@@ -289,6 +295,17 @@ app.post('/api/auth/forgot-password', async (c) => {
     const token = randomHex(32);
     const expiresAt = Date.now() + 60 * 60 * 1000;
     await c.env.DB.prepare('INSERT INTO password_reset_tokens (email, token, expires_at) VALUES (?, ?, ?)').bind(user.email, token, expiresAt).run();
+    const origin = new URL(c.req.url).origin;
+    const resetUrl = `${origin}/reset-password?token=${token}`;
+    const html = `<div style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;padding:24px;color:#17171A">
+      <p style="font-size:18px;line-height:1.5">Hey,</p>
+      <p style="font-size:16px;line-height:1.6">We received a request to reset your BreakFree password. Click the button below to choose a new one. This link expires in 1 hour.</p>
+      <p style="text-align:center;margin:28px 0">
+        <a href="${resetUrl}" style="background:#E50914;color:#fff;padding:14px 26px;border-radius:14px;text-decoration:none;font-weight:bold">Reset password</a>
+      </p>
+      <p style="font-size:13px;color:#666">If you didn&apos;t request this, you can safely ignore this email. Your password won&apos;t change.</p>
+    </div>`;
+    sendEmail(c.env, { to: user.email, subject: 'Reset your BreakFree password', html }).catch((e) => console.error('reset email failed:', e.message));
   }
   return c.json({ message: 'If this email exists, a reset link was sent.' }, 200);
 });
