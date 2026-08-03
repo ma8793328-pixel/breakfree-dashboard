@@ -39,7 +39,7 @@ app.use('*', async (c, next) => {
 });
 
 // Set auth cookie from login/signup responses.
-app.use('/api/auth/*', async (c, next) => {
+app.use('/api/auth*', async (c, next) => {
   await next();
   const setCookie = c.res.headers.get('Set-Cookie');
   if (setCookie && setCookie.includes('bf_auth=')) {
@@ -175,8 +175,8 @@ function rateLimit(key) {
   return true;
 }
 
-// Global rate limit on all auth endpoints: 10 requests/minute per IP.
-app.use('/api/auth/*', async (c, next) => {
+// Global rate limit on all auth endpoints: 2 requests/minute per IP (testing).
+app.use('/api/auth*', async (c, next) => {
   const ip = c.req.raw.headers.get('CF-Connecting-IP') || 'unknown';
   const allowed = rateLimit(`auth:${ip}`);
   console.log(`[rate limit] auth:${ip} allowed=${allowed} path=${c.req.url}`);
