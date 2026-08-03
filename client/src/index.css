@@ -3021,6 +3021,17 @@ a {
   font-weight: 600;
 }
 
+.landing-testimonials-soon {
+  text-align: center;
+  max-width: 560px;
+  margin: 0 auto;
+  padding: 20px 0 8px;
+}
+
+.landing-testimonials-soon .landing-sub {
+  margin-bottom: 24px;
+}
+
 .landing-cta {
   text-align: center;
   padding: 72px 24px;

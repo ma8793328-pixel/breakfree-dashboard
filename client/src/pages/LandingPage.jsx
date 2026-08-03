@@ -28,12 +28,6 @@ const STEPS = [
   { n: '04', title: 'Watch the body heal', text: 'Sleep, energy, heart rate — the receipts of recovery.' },
 ];
 
-const TESTIMONIALS = [
-  { q: 'Day 4 nearly broke me. The coach saw it coming and talked me through it.', name: 'Alex, 40 days clean' },
-  { q: 'Watching my resting heart rate fall day by day is what kept me checking in.', name: 'Priya, 67 days clean' },
-  { q: 'The shield token gave me a second chance on day 6. No shame, just momentum.', name: 'Marcus, 21 days clean' },
-];
-
 function HealingChart() {
   return (
     <figure className="landing-chart" role="img" aria-label="Mockup: resting heart rate falls and sleep quality rises across the first seven days">
@@ -133,7 +127,7 @@ export default function LandingPage() {
         </p>
 
         <div className="landing-proof">
-          <span className="landing-proof-badge">500+ people have started their journey</span>
+          <span className="landing-proof-badge">Join a growing community of people breaking habits</span>
           <span className="landing-proof-count">
             {shareTotal != null
               ? `${shareTotal.toLocaleString()} milestone${shareTotal === 1 ? '' : 's'} reached by the community`
@@ -224,14 +218,13 @@ export default function LandingPage() {
       </section>
 
       <section className="landing-section" id="testimonials">
-        <h2 className="landing-h2">From the community</h2>
-        <div className="landing-grid landing-grid-3">
-          {TESTIMONIALS.map((t) => (
-            <figure className="landing-testimonial" key={t.name}>
-              <blockquote>“{t.q}”</blockquote>
-              <figcaption>{t.name}</figcaption>
-            </figure>
-          ))}
+        <h2 className="landing-h2">Real stories are on the way</h2>
+        <div className="landing-testimonials-soon">
+          <p className="landing-sub landing-sub-narrow">
+            We're collecting honest stories from our community — the wins, the slips, the day-4
+            walls crossed. Be one of the first to share yours.
+          </p>
+          <Link className="btn btn-primary" to="/signup">Start your story</Link>
         </div>
       </section>
 
