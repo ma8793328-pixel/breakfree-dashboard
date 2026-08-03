@@ -30,7 +30,7 @@ const STEPS = [
 
 function HealingChart() {
   return (
-    <figure className="landing-chart" role="img" aria-label="Mockup: resting heart rate falls and sleep quality rises across the first seven days">
+    <figure className="landing-chart" role="img" aria-label="Chart showing improvement in sleep quality and a decrease in resting heart rate from day 1 to day 7">
       <svg viewBox="0 0 480 220" className="landing-chart-svg" aria-hidden="true">
         <g className="landing-chart-grid">
           {[0, 1, 2, 3, 4].map((i) => (
@@ -129,7 +129,7 @@ export default function LandingPage() {
         <div className="landing-proof">
           <span className="landing-proof-badge">Join a growing community of people breaking habits</span>
           <span className="landing-proof-count">
-            {shareTotal != null
+            {shareTotal != null && shareTotal > 0
               ? `${shareTotal.toLocaleString()} milestone${shareTotal === 1 ? '' : 's'} reached by the community`
               : 'Free to start · no credit card needed'}
           </span>
