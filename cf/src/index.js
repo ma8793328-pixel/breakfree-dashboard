@@ -211,8 +211,8 @@ The app uses local storage for offline drafts and UI preferences. No advertising
 6. Contact
 For privacy questions contact: privacy@breakfree.app`;
 
-app.get('/legal/terms', (c) => c.new Response(TERMS_TEXT, { headers: { 'Content-Type': 'text/plain; charset=utf-8' } }));
-app.get('/legal/privacy', (c) => c.new Response(PRIVACY_TEXT, { headers: { 'Content-Type': 'text/plain; charset=utf-8' } }));
+app.get('/legal/terms', (c) => new Response(TERMS_TEXT, { headers: { 'Content-Type': 'text/plain; charset=utf-8' } }));
+app.get('/legal/privacy', (c) => new Response(PRIVACY_TEXT, { headers: { 'Content-Type': 'text/plain; charset=utf-8' } }));
 app.get('/terms', (c) => c.redirect('/legal/terms'));
 app.get('/privacy', (c) => c.redirect('/legal/privacy'));
 
