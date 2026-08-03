@@ -99,7 +99,7 @@ a {
   max-width: 480px;
   margin: 0 auto;
   min-height: 100dvh;
-  padding: 24px 20px calc(var(--nav-h) + 28px);
+  padding: 24px 20px calc(var(--nav-h) + env(safe-area-inset-bottom) + 72px);
   position: relative;
 }
 
@@ -380,6 +380,15 @@ a {
   color: var(--muted);
   font-size: 13px;
   margin-top: 4px;
+}
+
+.streak-encourage {
+  color: var(--cream);
+  font-size: 14px;
+  font-weight: 700;
+  margin-top: 10px;
+  line-height: 1.5;
+  animation: fade-in 0.5s ease;
 }
 
 /* ---------- Metric grid ---------- */
@@ -1588,6 +1597,41 @@ a {
 
 .help-card .btn-ghost {
   border-color: rgba(229, 9, 20, 0.45);
+}
+
+/* ---------- FAB ---------- */
+
+.fab {
+  position: fixed;
+  bottom: calc(var(--nav-h) + env(safe-area-inset-bottom) + 16px);
+  right: max(16px, calc((100vw - 480px) / 2 + 16px));
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  border: none;
+  background: linear-gradient(135deg, #E50914, #B20710);
+  color: #fff;
+  font-size: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 6px 24px rgba(229, 9, 20, 0.5);
+  z-index: 55;
+  cursor: pointer;
+  transition: transform 0.12s ease, box-shadow 0.15s ease;
+}
+
+.fab:active {
+  transform: scale(0.93);
+}
+
+/* ---------- Report preview ---------- */
+
+.report-preview {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--sage);
+  margin-top: 4px;
 }
 
 /* ---------- Limit bar ---------- */

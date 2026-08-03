@@ -59,6 +59,8 @@ export default function Dashboard() {
 
   const [flow, setFlow] = useState(null);
   const [slipNote, setSlipNote] = useState('');
+  const [slipTrigger, setSlipTrigger] = useState('');
+  const [slipResetDone, setSlipResetDone] = useState(false);
   const [showUrge, setShowUrge] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [recovery, setRecovery] = useState(null);
@@ -312,7 +314,7 @@ export default function Dashboard() {
       const res = await api(`/habits/${active.id}/checkin`, {
         method: 'POST',
         token,
-        body: { status: 'slip', note: slipNote.trim() || null, date: localDate() },
+        body: { status: 'slip', note: slipNote.trim() || null, trigger: slipTrigger || null, date: localDate() },
       });
       upsertHabit(res.habit);
       refresh();
@@ -367,6 +369,8 @@ export default function Dashboard() {
   function closeFlow() {
     setFlow(null);
     setSlipNote('');
+    setSlipTrigger('');
+    setSlipResetDone(false);
   }
 
   async function shareMilestone() {
@@ -427,6 +431,14 @@ export default function Dashboard() {
         <div className="hero-row">
           <button className="btn btn-ghost btn-sm" onClick={() => navigate('/app/days-out')}>
             📍 Change of scene
+          </button>
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={() => window.open('https://www.google.com', '_blank')}
+            aria-label="Quick exit — opens a neutral page"
+            title="Quick exit"
+          >
+            🚪 Quick exit
           </button>
           <div className="menu-wrap">
             <button className="menu-btn" onClick={() => setMenuOpen((v) => !v)} aria-label="Menu">
@@ -526,8 +538,13 @@ export default function Dashboard() {
       <div className="streak-card">
         <div className="streak-number">{streak}</div>
         <div className="streak-label">{streak === 1 ? 'day clean' : 'days clean'}</div>
+        {streak === 0 && (
+          <p className="streak-encourage">
+            Day 0 is the hardest day. You're already here — that takes courage. 💪
+          </p>
+        )}
         {shieldTokens > 0 && (
-          <p className="streak-sub" style={{ marginTop: 2 }}>
+          <p className="streak-sub" style={{ marginTop: streak === 0 ? 8 : 2 }}>
             🛡️ {shieldTokens} streak {shieldTokens === 1 ? 'token' : 'tokens'} — protects your streak
           </p>
         )}
@@ -759,6 +776,15 @@ export default function Dashboard() {
         </button>
       </div>
 
+      <button
+        className="fab"
+        onClick={() => setShowUrge(true)}
+        aria-label="Log an urge"
+        title="Log an urge"
+      >
+        ⚡
+      </button>
+
       {active.stats.moneySaved > 0 || active.stats.timeSaved > 0 || active.stats.unitsAvoided > 0 || totalResisted > 0 ? (
         <div className="metric-grid">
           {totalResisted > 0 && (
@@ -820,6 +846,11 @@ export default function Dashboard() {
           <p className="muted small" style={{ marginTop: 2 }}>
             Streaks, savings and patterns — unpacked for you.
           </p>
+          {active.stats.moneySaved > 0 && (
+            <p className="report-preview">
+              £{active.stats.moneySaved.toLocaleString()} saved · {active.stats.unitsAvoided} {unitLabel(active.name).toLowerCase()} avoided this streak
+            </p>
+          )}
         </div>
         <button className="btn btn-ghost btn-sm" onClick={() => navigate('/app/report')}>
           Open
@@ -878,6 +909,42 @@ export default function Dashboard() {
             <p className="sub">
               Want to note what happened? It helps you spot patterns — and it stays private.
             </p>
+            <div className="field">
+              <label>What triggered it?</label>
+              <div className="chip-row">
+                {[
+                  { value: 'stress', label: '😫 Stress' },
+                  { value: 'boredom', label: '😴 Boredom' },
+                  { value: 'social', label: '🎉 Social' },
+                  { value: 'emotional', label: '🌧️ Emotional' },
+                  { value: 'place', label: '📍 Place / routine' },
+                  { value: 'habit', label: '🍺 Around the habit' },
+                  { value: 'other', label: '🗒️ Other' },
+                ].map((t) => (
+                  <button
+                    type="button"
+                    key={t.value}
+                    className={`chip${slipTrigger === t.value ? ' active' : ''}`}
+                    onClick={() => setSlipTrigger(slipTrigger === t.value ? '' : t.value)}
+                  >
+                    {t.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {!slipResetDone && (
+              <button
+                className="btn btn-ghost btn-block mt"
+                type="button"
+                onClick={() => {
+                  setSlipResetDone(true);
+                  navigate('/app/help');
+                }}
+                style={{ borderColor: 'rgba(168,192,154,0.35)', color: 'var(--sage)' }}
+              >
+                🧘 Try the 5-minute reset first
+              </button>
+            )}
             <textarea
               value={slipNote}
               onChange={(e) => setSlipNote(e.target.value)}
