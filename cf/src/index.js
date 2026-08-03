@@ -1291,6 +1291,13 @@ app.get('/api/admin/status', async (c) => {
   const subsCount = Number((await c.env.DB.prepare('SELECT COUNT(*) AS n FROM push_subscriptions').first())?.n || 0);
   const uptime = Math.round((Date.now() - c.env.STARTED_AT) / 1000) || 0;
   const runAge = age(metaRows.nudges_last_run);
+  const nudgeHealthy = runAge != null && runAge <= 27;
+  const today = new Date().toISOString().slice(0, 10);
+  const todayCheckins = Number((await c.env.DB.prepare('SELECT COUNT(*) AS n FROM checkins WHERE date = ?').bind(today).first())?.n || 0);
+  const todayUrges = Number((await c.env.DB.prepare('SELECT COUNT(*) AS n FROM urges WHERE date(logged_at) = ?').bind(today).first())?.n || 0);
+  const communityPosts = Number((await c.env.DB.prepare('SELECT COUNT(*) AS n FROM community_posts').first())?.n || 0);
+  const communityComments = Number((await c.env.DB.prepare('SELECT COUNT(*) AS n FROM community_comments').first())?.n || 0);
+  const openReports = Number((await c.env.DB.prepare("SELECT COUNT(*) AS n FROM community_reports WHERE status = 'open'").first())?.n || 0);
   const notifications = {
     lastRun: metaRows.nudges_last_run || null,
     lastSent: metaRows.nudges_last_sent || null,
@@ -1298,15 +1305,19 @@ app.get('/api/admin/status', async (c) => {
     subs: subsCount,
     runAgeH: runAge,
     sentAgeH: age(metaRows.nudges_last_sent),
-    healthy: runAge != null && runAge <= 27,
+    healthy: nudgeHealthy,
   };
+  const serverHealthy = nudgeHealthy && errors24h === 0;
   return c.json({
     uptime,
     startedAt: new Date(Date.now() - uptime * 1000).toISOString(),
     counts,
     premiumUsers: Number(premium?.n || 0),
-    errors24h: Number(errors24h?.n || 0),
+    errors24h: Number(errors24h || 0),
     notifications,
+    today: { checkins: todayCheckins, urges: todayUrges },
+    community: { posts: communityPosts, comments: communityComments, openReports },
+    server: { healthy: serverHealthy, status: serverHealthy ? 'healthy' : 'degraded' },
   });
 });
 
@@ -1316,6 +1327,16 @@ app.get('/api/admin/errors', async (c) => {
   if (u.role !== 'admin') return c.json({ error: 'Admin access required.' }, 403);
   const errors = (await c.env.DB.prepare('SELECT id, message, url, created_at FROM app_errors ORDER BY id DESC LIMIT 50').all()).results;
   return c.json({ errors });
+});
+
+app.post('/api/admin/clear-errors', async (c) => {
+  const u = userOf(c);
+  if (!u) return c.json({ error: 'Not authenticated' }, 401);
+  if (u.role !== 'admin') return c.json({ error: 'Admin access required.' }, 403);
+  const body = await c.req.json().catch(() => ({}));
+  const olderThan = body.olderThan ? ` AND created_at < datetime('now', '-${Math.max(1, Number(body.olderThan) || 24)} hours')` : '';
+  const res = await c.env.DB.prepare(`DELETE FROM app_errors WHERE 1=1${olderThan}`).run();
+  return c.json({ deleted: res.changes });
 });
 
 app.post('/api/admin/ai-check', async (c) => {
@@ -1332,12 +1353,13 @@ app.post('/api/admin/ai-check', async (c) => {
   }
   const counts = await countsFor(c.env);
   checks.push({ name: 'Data integrity', ok: true, detail: `${counts.users} users, ${counts.habits} habits` });
+  const today = todayKey();
   const sample = [
-    { date: '2026-08-01', status: 'clean' },
-    { date: '2026-07-31', status: 'clean' },
-    { date: '2026-07-30', status: 'slip' },
-    { date: '2026-07-29', status: 'clean' },
-    { date: '2026-07-28', status: 'clean' },
+    { date: today, status: 'clean' },
+    { date: addDays(today, -1), status: 'clean' },
+    { date: addDays(today, -2), status: 'slip' },
+    { date: addDays(today, -3), status: 'clean' },
+    { date: addDays(today, -4), status: 'clean' },
   ];
   const s = computeStats(sample, 10, 1);
   const streakOk = s.currentStreak === 2 && s.longestStreak === 2 && s.totalSlips === 1 && s.totalClean === 4;

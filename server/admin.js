@@ -1,5 +1,5 @@
 import { db } from './db.js';
-import { computeStats, BADGE_THRESHOLDS } from './stats.js';
+import { computeStats, BADGE_THRESHOLDS, todayKey, addDays } from './stats.js';
 import { checkHealth as checkOpenAI } from './openai.js';
 import { activateSubscription } from './billing.js';
 
@@ -47,12 +47,13 @@ export async function runHealthCheck() {
 
   // 3. Streak engine sanity (synthetic data, expected result)
   {
+    const today = todayKey();
     const sample = [
-      { date: '2026-08-01', status: 'clean' },
-      { date: '2026-07-31', status: 'clean' },
-      { date: '2026-07-30', status: 'slip' },
-      { date: '2026-07-29', status: 'clean' },
-      { date: '2026-07-28', status: 'clean' },
+      { date: today, status: 'clean' },
+      { date: addDays(today, -1), status: 'clean' },
+      { date: addDays(today, -2), status: 'slip' },
+      { date: addDays(today, -3), status: 'clean' },
+      { date: addDays(today, -4), status: 'clean' },
     ];
     const s = computeStats(sample, 10, 1);
     const ok = s.currentStreak === 2 && s.longestStreak === 2 && s.totalSlips === 1 && s.totalClean === 4;
