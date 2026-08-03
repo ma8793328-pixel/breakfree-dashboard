@@ -1,15 +1,16 @@
-import { useEffect, useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { useNavigate, useLocation } from 'react-router-dom';
 import Layout from '../components/Layout.jsx';
 import { useAuth } from '../auth.jsx';
 import { useHabits } from '../habits.jsx';
-import { useSubscription } from '../subscription.jsx';
-import { api, localDate } from '../api.js';
-import { MILESTONES, pickQuote } from '../data.js';
+import { api, localDate, forgiveCheckin, spendShieldToken } from '../api.js';
+import { MILESTONES, pickQuote, unitLabel } from '../data.js';
+import { dailyCoachNote, wallMessage, SURVIVAL_NOTE } from '../aiCoach.js';
 import UrgeModal from '../components/UrgeModal.jsx';
 import Celebration from '../components/Celebration.jsx';
+import ShareCard from '../components/ShareCard.jsx';
 import Badge from '../components/Badge.jsx';
-import { usePushNotifications } from '../usePushNotifications.js';
+import { usePushNotifications, scheduleTriggerNudges } from '../usePushNotifications.js';
 import { queueOffline, flushOfflineQueue } from '../offline.js';
 
 function ScalePicker({ label, value, onChange, lowEnd = 'Low', highEnd = 'High' }) {
@@ -53,7 +54,6 @@ function ScalePicker({ label, value, onChange, lowEnd = 'Low', highEnd = 'High' 
 export default function Dashboard() {
   const { token, user, logout } = useAuth();
   const { habits, active, loading, refresh, select, upsertHabit } = useHabits();
-  const { premium } = useSubscription();
   const { supported: pushSupported, status: pushStatus, error: pushError } = usePushNotifications(token);
   const navigate = useNavigate();
 
@@ -65,6 +65,11 @@ export default function Dashboard() {
   const [recoveryBusy, setRecoveryBusy] = useState(false);
   const [overrideToday, setOverrideToday] = useState(false);
   const [lastJournal, setLastJournal] = useState(null);
+  const [todayUrgeCount, setTodayUrgeCount] = useState(0);
+  const [urgePeak, setUrgePeak] = useState(null);
+  const [totalUrges, setTotalUrges] = useState(0);
+  const shieldTokens = active?.shieldTokens || 0;
+  const [totalResisted, setTotalResisted] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
 
@@ -73,6 +78,92 @@ export default function Dashboard() {
   const [wellnessForm, setWellnessForm] = useState({ energy: 3, sleep: 3, mood: 3 });
   const [wellnessBusy, setWellnessBusy] = useState(false);
   const [offlineNote, setOfflineNote] = useState(null);
+  const [isOnline, setIsOnline] = useState(typeof navigator !== 'undefined' ? navigator.onLine : true);
+  const wellnessRef = useRef(null);
+  const [welcomeHabit, setWelcomeHabit] = useState(null);
+
+  useEffect(() => {
+    const loc = window.location;
+    if (loc.state?.welcome) {
+      setWelcomeHabit(loc.state.welcome);
+      window.history.replaceState(null, '');
+    }
+  }, []);
+
+  const CHECKIN_DRAFT_KEY = 'bf_checkin_draft';
+
+  function readCheckinDraft() {
+    try {
+      const raw = localStorage.getItem(CHECKIN_DRAFT_KEY);
+      const draft = raw ? JSON.parse(raw) : null;
+      if (draft && typeof draft.energy === 'number' && typeof draft.sleep === 'number' && typeof draft.mood === 'number') {
+        return draft;
+      }
+    } catch {
+      // ignore corrupt data
+    }
+    return null;
+  }
+
+  function writeCheckinDraft(form) {
+    try {
+      localStorage.setItem(CHECKIN_DRAFT_KEY, JSON.stringify(form));
+    } catch {
+      // storage full or blocked
+    }
+  }
+
+  function clearCheckinDraft() {
+    try {
+      localStorage.removeItem(CHECKIN_DRAFT_KEY);
+    } catch {
+      // ignore
+    }
+  }
+
+  useEffect(() => {
+    const goOnline = () => {
+      setIsOnline(true);
+      flushOfflineQueue(token).then((flushed) => {
+        if (flushed) {
+          setOfflineNote(null);
+          refresh();
+        }
+      });
+    };
+    const goOffline = () => setIsOnline(false);
+    window.addEventListener('online', goOnline);
+    window.addEventListener('offline', goOffline);
+    return () => {
+      window.removeEventListener('online', goOnline);
+      window.removeEventListener('offline', goOffline);
+    };
+  }, [token, refresh]);
+
+  useEffect(() => {
+    if (pushStatus === 'granted' && !urgePeak && active?.id && token) {
+      api(`/habits/${active.id}/urges`, { token })
+        .then((data) => scheduleTriggerNudges(data.urges || [], token, active.id))
+        .then((result) => { if (result) setUrgePeak(result); })
+        .catch(() => {});
+    }
+  }, [pushStatus, urgePeak, active?.id, token]);
+
+  // Deep link from push notifications: /app?action=checkin lands on the check-in card.
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get('action') !== 'checkin') return;
+    const t = setTimeout(() => {
+      wellnessRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      wellnessRef.current?.classList.add('flash-focus');
+    }, 350);
+    const clean = setTimeout(() => {
+      window.history.replaceState(null, '', window.location.pathname);
+    }, 1600);
+    return () => {
+      clearTimeout(t);
+      clearTimeout(clean);
+    };
+  }, [active?.id]);
 
   const todayClean = active?.stats?.todayStatus === 'clean';
   const todaySlip = active?.stats?.todayStatus === 'slip';
@@ -93,6 +184,20 @@ export default function Dashboard() {
         if (!cancelled && data.journals?.length > 0) setLastJournal(data.journals[0]);
       })
       .catch(() => {});
+    api(`/habits/${active.id}/urges`, { token })
+      .then((data) => {
+        if (!cancelled) {
+          const t = localDate();
+          const allUrges = data.urges || [];
+          setTotalUrges(allUrges.length);
+          setTotalResisted(allUrges.filter((u) => u.resisted).length);
+          setTodayUrgeCount(allUrges.filter((u) => String(u.logged_at || '').slice(0, 10) === t).length);
+          scheduleTriggerNudges(allUrges, token, active.id).then((result) => {
+            if (result) setUrgePeak(result);
+          });
+        }
+      })
+      .catch(() => {});
     return () => {
       cancelled = true;
     };
@@ -100,6 +205,17 @@ export default function Dashboard() {
   }, [active?.id, token]);
 
   const quote = useMemo(() => (streak > 0 ? pickQuote(streak) : null), [streak]);
+  const coachNote = useMemo(
+    () =>
+      dailyCoachNote({
+        streak,
+        totalSlips: active?.stats?.totalSlips ?? 0,
+        dailyCheckin: wellness,
+        todayUrges: todayUrgeCount,
+        reason: active?.reason || null,
+      }),
+    [streak, active?.stats?.totalSlips, active?.reason, wellness, todayUrgeCount]
+  );
 
   useEffect(() => {
     if (!active || !token) return;
@@ -111,9 +227,15 @@ export default function Dashboard() {
           setWellness(data.checkin);
           setWellnessForm({ energy: data.checkin.energy, sleep: data.checkin.sleep, mood: data.checkin.mood });
           setWellnessEdit(false);
+        } else {
+          const draft = readCheckinDraft();
+          if (draft) setWellnessForm(draft);
         }
       })
-      .catch(() => {});
+      .catch(() => {
+        const draft = readCheckinDraft();
+        if (draft) setWellnessForm(draft);
+      });
     return () => {
       cancelled = true;
     };
@@ -121,25 +243,8 @@ export default function Dashboard() {
   }, [active?.id, token]);
 
   useEffect(() => {
-    if (!token) return;
-    flushOfflineQueue(token).then((flushed) => {
-      if (flushed) {
-        setOfflineNote(null);
-        refresh();
-      }
-    });
-    const onOnline = () => {
-      flushOfflineQueue(token).then((flushed) => {
-        if (flushed) {
-          setOfflineNote(null);
-          refresh();
-        }
-      });
-    };
-    window.addEventListener('online', onOnline);
-    return () => window.removeEventListener('online', onOnline);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token]);
+    writeCheckinDraft(wellnessForm);
+  }, [wellnessForm]);
 
   async function saveWellness() {
     if (!active || wellnessBusy) return;
@@ -154,8 +259,9 @@ export default function Dashboard() {
       setWellness(data.checkin);
       setWellnessForm({ energy: data.checkin.energy, sleep: data.checkin.sleep, mood: data.checkin.mood });
       setWellnessEdit(false);
+      clearCheckinDraft();
     } catch (err) {
-      if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      if (!navigator.onLine) {
         queueOffline({
           path: `/habits/${active.id}/daily-checkin`,
           method: 'POST',
@@ -163,6 +269,7 @@ export default function Dashboard() {
         });
         setWellness({ ...wellnessForm, date: localDate() });
         setWellnessEdit(false);
+        clearCheckinDraft();
         setOfflineNote('Saved on this device — will sync when you\'re back online.');
       } else {
         setError(err.message);
@@ -226,16 +333,51 @@ export default function Dashboard() {
     }
   }
 
+  async function handleForgive(forgiven) {
+    if (!active || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await forgiveCheckin(active.id, localDate(), forgiven, token);
+      upsertHabit(res.habit);
+      refresh();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleShield() {
+    if (!active || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await spendShieldToken(active.id, token);
+      upsertHabit(res.habit);
+      refresh();
+      closeFlow();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function closeFlow() {
     setFlow(null);
     setSlipNote('');
+  }
+
+  async function shareMilestone() {
+    setFlow((f) => ({ ...f, kind: 'share' }));
   }
 
   async function getRecoveryPlan() {
     if (!active || recoveryBusy) return;
     setRecoveryBusy(true);
     try {
-      const data = await api('/premium/recovery-plan', {
+      const data = await api('/recovery-plan', {
         method: 'POST',
         token,
         body: { habitId: active.id },
@@ -262,21 +404,29 @@ export default function Dashboard() {
 
   return (
     <Layout>
+      {!isOnline && (
+        <div style={{
+          padding: '10px 16px',
+          background: 'rgba(217,142,106,0.12)',
+          border: '1px solid rgba(217,142,106,0.3)',
+          borderRadius: 12,
+          marginBottom: 16,
+          textAlign: 'center',
+          color: 'var(--cream)',
+          fontSize: 14,
+        }}>
+          📴 You're offline — check-ins and journal entries will sync when you reconnect.
+        </div>
+      )}
       <section className="hero">
         <div className="hero-kicker">
           {greeting}, {user?.email?.split('@')[0]}
-          {premium && <span className="badge-pill premium" style={{ marginLeft: 8 }}>👑 Premium</span>}
         </div>
         <h1 className="hero-title">{active.name}</h1>
         <p className="hero-sub">One day at a time. Today counts.</p>
         <div className="hero-row">
-          {!premium && (
-            <button className="btn btn-ghost btn-sm" onClick={() => navigate('/app/premium')}>
-              👑 Premium
-            </button>
-          )}
           <button className="btn btn-ghost btn-sm" onClick={() => navigate('/app/days-out')}>
-            🌳 Days out
+            📍 Change of scene
           </button>
           <div className="menu-wrap">
             <button className="menu-btn" onClick={() => setMenuOpen((v) => !v)} aria-label="Menu">
@@ -287,11 +437,8 @@ export default function Dashboard() {
                 <div className="menu-backdrop" onClick={() => setMenuOpen(false)} />
                 <div className="menu-dropdown">
                   <div className="menu-head">{user?.email}</div>
-                  <button className="menu-item" onClick={() => { setMenuOpen(false); navigate('/app/premium'); }}>
-                    👑 Premium
-                  </button>
                   <button className="menu-item" onClick={() => { setMenuOpen(false); navigate('/app/days-out'); }}>
-                    🌳 Days out
+                    📍 Change of scene
                   </button>
                   <button className="menu-item" onClick={() => { setMenuOpen(false); navigate('/app/report'); }}>
                     📊 Monthly report
@@ -301,6 +448,9 @@ export default function Dashboard() {
                   </button>
                   <button className="menu-item" onClick={() => { setMenuOpen(false); navigate('/app/settings'); }}>
                     🔔 Notifications
+                  </button>
+                  <button className="menu-item" onClick={() => { setMenuOpen(false); navigate('/app/help'); }}>
+                    🆘 Get help
                   </button>
                   {user?.role === 'admin' && (
                     <button className="menu-item" onClick={() => { setMenuOpen(false); navigate('/app/admin'); }}>
@@ -332,17 +482,96 @@ export default function Dashboard() {
         </div>
       )}
 
+      {urgePeak && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 14, padding: 14, background: 'rgba(217,142,106,0.08)', border: '1px solid rgba(217,142,106,0.25)', borderRadius: 16 }}>
+          <span style={{ fontSize: 28 }}>🎯</span>
+          <div style={{ flex: 1 }}>
+            <p style={{ fontWeight: 600, margin: 0 }}>Your urge peak is around {urgePeak.label}. Stay ready.</p>
+            <p className="muted small" style={{ marginTop: 1 }}>We'll nudge you ahead of that window.</p>
+          </div>
+        </div>
+      )}
+
+      {welcomeHabit && (
+        <div style={{
+          background: 'linear-gradient(135deg, rgba(229,9,20,0.18), rgba(229,9,20,0.04))',
+          border: '1px solid rgba(229,9,20,0.4)',
+          borderRadius: 20,
+          padding: '18px 20px',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 14,
+          animation: 'fade-in 0.35s ease',
+        }}>
+          <span style={{ fontSize: 32 }}>🎉</span>
+          <div style={{ flex: 1 }}>
+            <p style={{ fontFamily: 'var(--font-head)', fontWeight: 800, fontSize: 16, margin: 0, color: 'var(--cream)' }}>
+              Welcome, {welcomeHabit} warrior.
+            </p>
+            <p className="muted small" style={{ marginTop: 2 }}>
+              Your plan is locked in. Every day you show up counts.
+            </p>
+          </div>
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={() => setWelcomeHabit(null)}
+            aria-label="Dismiss"
+            style={{ flexShrink: 0 }}
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
       <div className="streak-card">
         <div className="streak-number">{streak}</div>
         <div className="streak-label">{streak === 1 ? 'day clean' : 'days clean'}</div>
+        {shieldTokens > 0 && (
+          <p className="streak-sub" style={{ marginTop: 2 }}>
+            🛡️ {shieldTokens} streak {shieldTokens === 1 ? 'token' : 'tokens'} — protects your streak
+          </p>
+        )}
         <p className="streak-sub">
           {active.stats.totalDays === 0
             ? 'Your journey starts today.'
-            : `${active.stats.totalClean} clean days total · started ${new Date(active.startDate + 'T00:00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`}
+            : `${active.stats.totalClean} clean days total · ${active.stats.recentClean}/14 clean in the last two weeks`}
         </p>
+        {active.stats.forgivenSlips > 0 && (
+          <p className="streak-sub" style={{ marginTop: 2 }}>
+            💚 {active.stats.forgivenSlips} {active.stats.forgivenSlips === 1 ? 'slip' : 'slips'} forgiven — you kept going
+          </p>
+        )}
       </div>
 
-      <div className="card wellness-card">
+      {active.wall?.active && (
+        <div className="wall-banner">
+          <div className="wall-banner-head">
+            <span className="wall-banner-title">🧱 Day {active.wall.day} — inside the Wall</span>
+            <span className="badge-pill">Survival mode</span>
+          </div>
+          <p className="wall-banner-text">{wallMessage(active.wall.day) || SURVIVAL_NOTE}</p>
+          <p className="wall-banner-sub">
+            Check in twice today and log every urge. This is the window where streaks are won.
+          </p>
+        </div>
+      )}
+
+      {coachNote && (
+        <div className="card coach-note-card">
+          <div className="coach-note-head">
+            <span className="post-avatar" style={{ width: 28, height: 28, fontSize: 14 }}>🧑‍🏫</span>
+            <div>
+              <p className="card-title" style={{ margin: 0 }}>Daily coach note</p>
+              <p className="muted tiny" style={{ marginTop: 1 }}>
+                From your check-ins, urges and streak
+              </p>
+            </div>
+          </div>
+          <p className="coach-note-text">{coachNote}</p>
+        </div>
+      )}
+
+      <div className="card wellness-card" ref={wellnessRef}>
         <div className="wellness-head">
           <div>
             <p className="card-title" style={{ margin: 0 }}>🌗 Daily check-in</p>
@@ -451,13 +680,31 @@ export default function Dashboard() {
             <div>
               <p className="card-title" style={{ margin: 0, color: 'var(--slip)' }}>Today was hard. That's okay.</p>
               <p className="muted small" style={{ marginTop: 2 }}>
-                Tomorrow is a fresh start. You're still here — that counts.
+                {active.stats.todayForgiven
+                  ? 'You forgave this one — your streak is still alive.'
+                  : "Tomorrow is a fresh start. You're still here — that counts."}
               </p>
             </div>
           </div>
+          {!active.stats.todayForgiven && (
+            <button
+              className="btn btn-ghost btn-sm mt"
+              onClick={() => handleForgive(true)}
+              disabled={busy}
+              title="Count this slip as a forgiven grace day — it won't break your streak"
+            >
+              💚 This slip doesn't break my streak
+            </button>
+          )}
+          {active.relapsePlan && (
+            <div className="card mt" style={{ padding: 14, background: 'var(--bg-soft)', borderColor: 'var(--border)' }}>
+              <p className="card-title" style={{ margin: 0 }}>📜 Your plan for this moment</p>
+              <p style={{ fontSize: 15, lineHeight: 1.5, margin: '8px 0 0' }}>{active.relapsePlan}</p>
+            </div>
+          )}
           <div className="row mt">
-            <button className="btn btn-primary" style={{ flex: 1 }} onClick={premium ? getRecoveryPlan : () => navigate('/app/premium')} disabled={recoveryBusy}>
-              {recoveryBusy ? 'Building your plan...' : premium ? '🗺️ 3-day recovery plan' : '👑 Unlock recovery plans'}
+            <button className="btn btn-primary" style={{ flex: 1 }} onClick={getRecoveryPlan} disabled={recoveryBusy}>
+              {recoveryBusy ? 'Building your plan...' : '🗺️ 3-day recovery plan'}
             </button>
             <button className="btn btn-ghost" onClick={() => setOverrideToday(true)}>
               ✏️ Change
@@ -497,11 +744,38 @@ export default function Dashboard() {
         </button>
       </div>
 
-      {active.stats.moneySaved > 0 || active.stats.timeSaved > 0 ? (
+      <div className="card help-card">
+        <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+          <span style={{ fontSize: 30 }}>🆘</span>
+          <div style={{ flex: 1 }}>
+            <p className="card-title" style={{ margin: 0 }}>Get help right now</p>
+            <p className="muted small" style={{ marginTop: 2 }}>
+              Urge hitting hard? Call a support line, breathe through it, or find local resources.
+            </p>
+          </div>
+        </div>
+        <button className="btn btn-ghost btn-sm mt" onClick={() => navigate('/app/help')}>
+          Open help
+        </button>
+      </div>
+
+      {active.stats.moneySaved > 0 || active.stats.timeSaved > 0 || active.stats.unitsAvoided > 0 || totalResisted > 0 ? (
         <div className="metric-grid">
+          {totalResisted > 0 && (
+            <div className="metric">
+              <div className="value">{totalResisted.toLocaleString()}</div>
+              <div className="label">urges resisted</div>
+            </div>
+          )}
+          {active.stats.unitsAvoided > 0 && (
+            <div className="metric">
+              <div className="value">{active.stats.unitsAvoided.toLocaleString()}</div>
+              <div className="label">{unitLabel(active.name)} avoided</div>
+            </div>
+          )}
           {active.stats.moneySaved > 0 && (
             <div className="metric">
-              <div className="value">${active.stats.moneySaved.toLocaleString()}</div>
+              <div className="value">£{active.stats.moneySaved.toLocaleString()}</div>
               <div className="label">saved this streak</div>
             </div>
           )}
@@ -513,6 +787,13 @@ export default function Dashboard() {
           )}
         </div>
       ) : null}
+
+      {active.reason && (
+        <div className="card">
+          <p className="card-title">🕯️ Why you're doing this</p>
+          <p style={{ fontSize: 16, lineHeight: 1.5, margin: 0 }}>{active.reason}</p>
+        </div>
+      )}
 
       {quote && <div className="quote">“{quote.text}”<span className="source">{quote.source}</span></div>}
 
@@ -537,13 +818,11 @@ export default function Dashboard() {
         <div style={{ flex: 1 }}>
           <p className="card-title" style={{ margin: 0 }}>Monthly report</p>
           <p className="muted small" style={{ marginTop: 2 }}>
-            {premium
-              ? 'Streaks, savings and patterns — unpacked for you.'
-              : 'A Premium look at how your month really went.'}
+            Streaks, savings and patterns — unpacked for you.
           </p>
         </div>
         <button className="btn btn-ghost btn-sm" onClick={() => navigate('/app/report')}>
-          {premium ? 'Open' : 'Unlock'}
+          Open
         </button>
       </div>
 
@@ -552,13 +831,11 @@ export default function Dashboard() {
         <div style={{ flex: 1 }}>
           <p className="card-title" style={{ margin: 0 }}>Your coach is here</p>
           <p className="muted small" style={{ marginTop: 2 }}>
-            {premium
-              ? 'Reads your streaks, urges and journal — always on your side.'
-              : 'A Premium companion that knows your journey.'}
+            Reads your streaks, urges and journal — always on your side.
           </p>
         </div>
         <button className="btn btn-primary btn-sm" onClick={() => navigate('/app/coach')}>
-          {premium ? 'Chat' : 'Unlock'}
+          Chat
         </button>
       </div>
 
@@ -608,6 +885,16 @@ export default function Dashboard() {
               maxLength={300}
               style={{ width: '100%', background: 'var(--bg-soft)', border: '1px solid var(--border)', borderRadius: 14, color: 'var(--cream)', padding: 14, fontFamily: 'var(--font-body)', fontSize: 15, minHeight: 110, resize: 'vertical' }}
             />
+            {shieldTokens > 0 && (
+              <button
+                className="btn btn-ghost btn-block mt"
+                onClick={handleShield}
+                disabled={busy}
+                title="Spend one token to convert this slip into a forgiven grace day — your streak stays alive."
+              >
+                🛡️ Use a streak token ({shieldTokens}) — keep your streak
+              </button>
+            )}
             <div className="row mt">
               <button className="btn btn-ghost" style={{ flex: 1 }} onClick={closeFlow}>
                 Skip
@@ -621,9 +908,24 @@ export default function Dashboard() {
       )}
 
       {flow?.kind === 'clean' && (
-        <Celebration kind="clean" quote={flow.quote} badge={flow.badge} onClose={closeFlow} />
+        <Celebration
+          kind="clean"
+          quote={flow.quote}
+          badge={flow.badge}
+          onClose={closeFlow}
+          onShare={flow.badge ? shareMilestone : undefined}
+        />
       )}
       {flow?.kind === 'slip' && <Celebration kind="slip" onClose={closeFlow} />}
+      {flow?.kind === 'share' && flow.badge && (
+        <ShareCard
+          habitId={active.id}
+          habitName={active.name}
+          days={flow.badge.threshold}
+          moneySaved={active.stats.moneySaved}
+          onClose={closeFlow}
+        />
+      )}
 
       {showUrge && <UrgeModal habitId={active.id} onClose={() => setShowUrge(false)} onSaved={refresh} />}
 

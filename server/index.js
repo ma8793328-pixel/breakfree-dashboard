@@ -6,21 +6,38 @@ import { mkdirSync, readdirSync, unlinkSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { db, indexJournal, DATA_DIR } from './db.js';
-import { BADGE_THRESHOLDS, computeStats, todayKey } from './stats.js';
+import { BADGE_THRESHOLDS, computeStats, todayKey, addDays } from './stats.js';
 import {
   PRICE_CENTS,
   FREE_HABIT_LIMIT,
-  isPremium,
   createCheckoutSession,
   completeCheckout,
+  activateSubscription,
+  startTrial,
   cancelSubscription,
   publicSubscription,
 } from './billing.js';
+import {
+  stripeConfigured,
+  createCheckout,
+  retrieveSession,
+  cancelStripeSubscription,
+  verifyWebhookSignature,
+} from './stripe.js';
 import { registerAiRoutes } from './ai.js';
+import { registerCommunityRoutes } from './community.js';
 import { registerAdminRoutes } from './admin.js';
 import { registerPremiumRoutes } from './premium.js';
-import { registerPushRoutes, notifyLowSleep, notifyUrgeTip, notifyMilestone, cleanupStaleSubscriptions, DEFAULT_PREFS, prefsFor } from './push.js';
+import { registerPushRoutes, notifyLowSleep, notifyUrgeTip, notifyMilestone, cleanupStaleSubscriptions, DEFAULT_PREFS, prefsFor, scheduleTriggerNudge, sweepTriggerNudges } from './push.js';
 import { findNearby, geocodeArea, GENERIC_IDEAS } from './daysout.js';
+import { evaluateUserEngagement, evaluateAllEngagement } from './engage.js';
+
+// The "Day 3–7 wall": a high-support window where survival-mode messaging and
+// extra nudges kick in. After day 7 the worst of acute withdrawal is behind.
+function wallInfo(stats) {
+  const day = stats?.currentStreak || 0;
+  return { active: day >= 3 && day <= 7, day };
+}
 
 // Load server/.env if present (PORT, JWT_SECRET, ADMIN_*, VAPID_*). Missing
 // file is fine — everything has local defaults or persisted fallbacks.
@@ -37,6 +54,9 @@ const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin12345';
 
 const app = express();
 app.use(cors());
+// Stripe webhooks need the raw body for signature verification — parse it
+// before the global JSON middleware consumes the stream.
+app.use('/api/stripe/webhook', express.raw({ type: 'application/json' }));
 app.use(express.json());
 
 // ---------- Auth helpers ----------
@@ -68,7 +88,13 @@ function requireAuth(req, res, next) {
   const token = header.startsWith('Bearer ') ? header.slice(7) : null;
   if (!token) return res.status(401).json({ error: 'Not authenticated' });
   try {
-    req.user = jwt.verify(token, JWT_SECRET);
+    const payload = jwt.verify(token, JWT_SECRET);
+    const existing = db.prepare('SELECT id FROM users WHERE id = ?').get(payload.id);
+    if (!existing) return res.status(401).json({ error: 'Account no longer exists' });
+    req.user = payload;
+    // Fire-and-forget: re-engagement cascade + Sunday digest (parity with the
+    // worker). Cheap because it short-circuits when the user checked in today.
+    void evaluateUserEngagement(payload.id).catch(() => {});
     next();
   } catch {
     return res.status(401).json({ error: 'Invalid or expired token' });
@@ -82,20 +108,13 @@ function requireAdmin(req, res, next) {
   next();
 }
 
-function requirePremium(req, res, next) {
-  if (!isPremium(req.user.id)) {
-    return res.status(402).json({ error: 'This is a Premium feature.', code: 'PREMIUM_REQUIRED' });
-  }
-  next();
-}
-
 function getHabitForUser(habitId, userId) {
   return db.prepare('SELECT * FROM habits WHERE id = ? AND user_id = ?').get(habitId, userId);
 }
 
 function getStatsForHabit(habit) {
-  const checkins = db.prepare('SELECT date, status FROM checkins WHERE habit_id = ?').all(habit.id);
-  return computeStats(checkins, habit.daily_cost, habit.daily_time);
+  const checkins = db.prepare('SELECT date, status, forgiven FROM checkins WHERE habit_id = ?').all(habit.id);
+  return computeStats(checkins, habit.daily_cost, habit.daily_time, habit.units_per_day);
 }
 
 function getBadges(habitId) {
@@ -117,7 +136,17 @@ function awardBadges(habitId, currentStreak) {
   return earned;
 }
 
+function parseTriggerTimes(raw) {
+  try {
+    const arr = JSON.parse(raw || '[]');
+    return Array.isArray(arr) ? arr : [];
+  } catch {
+    return [];
+  }
+}
+
 function habitPayload(habit) {
+  const stats = getStatsForHabit(habit);
   return {
     id: habit.id,
     name: habit.name,
@@ -125,8 +154,14 @@ function habitPayload(habit) {
     dailyCost: habit.daily_cost,
     costUnit: habit.cost_unit,
     dailyTime: habit.daily_time,
+    unitsPerDay: habit.units_per_day,
+    triggerTimes: parseTriggerTimes(habit.trigger_times),
+    reason: habit.reason,
+    relapsePlan: habit.relapse_plan,
+    shieldTokens: habit.shield_tokens || 0,
     createdAt: habit.created_at,
-    stats: getStatsForHabit(habit),
+    stats,
+    wall: wallInfo(stats),
     badges: getBadges(habit.id),
   };
 }
@@ -149,6 +184,7 @@ app.post('/api/auth/signup', (req, res) => {
     .prepare('INSERT INTO users (email, password_hash) VALUES (?, ?)')
     .run(String(email).toLowerCase(), hash);
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(info.lastInsertRowid);
+  startTrial(user.id);
   res.status(201).json({ token: signToken(user), user: publicUser(user) });
 });
 
@@ -168,29 +204,94 @@ app.get('/api/auth/me', requireAuth, (req, res) => {
   res.json({ user: publicUser(user) });
 });
 
-// ---------- Subscription (simulated checkout, Stripe-ready) ----------
+// ---------- Subscription (real Stripe Checkout, with simulated fallback) ----------
+
+// The success/cancel URLs must point at wherever the client is served. In
+// development that's the Vite dev server; in production it's this server.
+// Prefer an explicit APP_ORIGIN env var, else the browser's Origin header,
+// else the host the API was reached on.
+function appOrigin(req) {
+  return process.env.APP_ORIGIN || req.get('origin') || `${req.protocol}://${req.get('host')}`;
+}
 
 app.get('/api/subscription', requireAuth, (req, res) => {
   res.json({ subscription: publicSubscription(req.user.id), price: PRICE_CENTS });
 });
 
-app.post('/api/subscription/checkout', requireAuth, (req, res) => {
-  if (isPremium(req.user.id)) {
-    return res.json({ alreadyPremium: true, subscription: publicSubscription(req.user.id) });
-  }
-  res.json({ session: createCheckoutSession(req.user.id) });
+app.post('/api/subscription/checkout', requireAuth, async (req, res) => {
+  activateSubscription(req.user.id);
+  return res.json({ alreadyPremium: true, subscription: publicSubscription(req.user.id) });
 });
 
-app.post('/api/subscription/complete', requireAuth, (req, res) => {
+app.post('/api/subscription/complete', requireAuth, async (req, res) => {
   const { sessionId } = req.body || {};
+  if (stripeConfigured()) {
+    if (!sessionId || !String(sessionId).trim()) {
+      return res.status(400).json({ error: 'Missing session ID.' });
+    }
+    try {
+      // Verify the payment actually completed on Stripe before granting Premium.
+      const s = await retrieveSession(String(sessionId));
+      if (s.payment_status !== 'paid') {
+        return res.status(400).json({ error: 'Payment has not completed yet.' });
+      }
+      if (s.client_reference_id !== String(req.user.id)) {
+        return res.status(403).json({ error: 'Session does not match this account.' });
+      }
+      activateSubscription(req.user.id, { customer: s.customer, subscription: s.subscription });
+      return res.json({ subscription: publicSubscription(req.user.id) });
+    } catch (e) {
+      console.error('Stripe verification failed:', e.message);
+      return res.status(502).json({ error: 'Could not verify the payment.' });
+    }
+  }
   const result = completeCheckout(req.user.id, sessionId);
   if (!result.ok) return res.status(400).json({ error: result.error || 'Payment not completed.' });
   res.json({ subscription: publicSubscription(req.user.id) });
 });
 
-app.post('/api/subscription/cancel', requireAuth, (req, res) => {
+app.post('/api/subscription/cancel', requireAuth, async (req, res) => {
+  if (stripeConfigured()) {
+    const row = db
+      .prepare("SELECT stripe_subscription_id FROM subscriptions WHERE user_id = ? AND plan = 'premium' AND status = 'active'")
+      .get(req.user.id);
+    if (row?.stripe_subscription_id) await cancelStripeSubscription(row.stripe_subscription_id);
+  }
   cancelSubscription(req.user.id);
   res.json({ subscription: publicSubscription(req.user.id) });
+});
+
+// Stripe webhook: activate on checkout completion, downgrade on cancel.
+app.post('/api/stripe/webhook', async (req, res) => {
+  const rawBody = Buffer.isBuffer(req.body) ? req.body.toString('utf8') : String(req.body || '');
+  const okSig = await verifyWebhookSignature(rawBody, req.get('stripe-signature'));
+  if (!okSig) return res.status(400).json({ error: 'Invalid signature.' });
+  let event;
+  try {
+    event = JSON.parse(rawBody);
+  } catch {
+    return res.status(400).json({ error: 'Invalid payload.' });
+  }
+  try {
+    if (event.type === 'checkout.session.completed') {
+      const s = event.data.object;
+      const userId = Number(s.client_reference_id);
+      if (userId && s.payment_status === 'paid') {
+        activateSubscription(userId, { customer: s.customer, subscription: s.subscription });
+      }
+    } else if (event.type === 'customer.subscription.deleted') {
+      const sub = event.data.object;
+      if (sub?.metadata?.user_id) {
+        const uid = Number(sub.metadata.user_id);
+        db.prepare("UPDATE subscriptions SET status = 'cancelled' WHERE user_id = ?").run(uid);
+      } else {
+        db.prepare('UPDATE subscriptions SET status = ? WHERE stripe_subscription_id = ?').run('cancelled', sub.id);
+      }
+    }
+  } catch (e) {
+    console.error('Webhook handler failed:', e.message);
+  }
+  res.json({ received: true });
 });
 
 // ---------- Habits ----------
@@ -203,25 +304,15 @@ app.get('/api/habits', requireAuth, (req, res) => {
 });
 
 app.post('/api/habits', requireAuth, (req, res) => {
-  const { name, startDate, dailyCost, costUnit, dailyTime } = req.body || {};
+  const { name, startDate, dailyCost, costUnit, dailyTime, unitsPerDay, triggerTimes, reason, relapsePlan } = req.body || {};
   if (!name || !String(name).trim()) return res.status(400).json({ error: 'Habit name is required.' });
   if (!startDate || !/^\d{4}-\d{2}-\d{2}$/.test(startDate)) {
     return res.status(400).json({ error: 'A valid start date is required.' });
   }
 
-  if (!isPremium(req.user.id)) {
-    const owned = db.prepare('SELECT COUNT(*) AS c FROM habits WHERE user_id = ?').get(req.user.id).c;
-    if (owned >= FREE_HABIT_LIMIT) {
-      return res.status(402).json({
-        error: `The free plan includes ${FREE_HABIT_LIMIT} habit. Upgrade to add more.`,
-        code: 'PLAN_LIMIT',
-      });
-    }
-  }
-
   const info = db
     .prepare(
-      'INSERT INTO habits (user_id, name, start_date, daily_cost, cost_unit, daily_time) VALUES (?, ?, ?, ?, ?, ?)'
+      'INSERT INTO habits (user_id, name, start_date, daily_cost, cost_unit, daily_time, units_per_day, trigger_times, reason, relapse_plan) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
     )
     .run(
       req.user.id,
@@ -229,7 +320,11 @@ app.post('/api/habits', requireAuth, (req, res) => {
       startDate,
       dailyCost && dailyCost > 0 ? dailyCost : null,
       costUnit || 'day',
-      dailyTime && dailyTime > 0 ? dailyTime : null
+      dailyTime && dailyTime > 0 ? dailyTime : null,
+      unitsPerDay && unitsPerDay > 0 ? unitsPerDay : null,
+      Array.isArray(triggerTimes) && triggerTimes.length > 0 ? JSON.stringify(triggerTimes) : null,
+      reason && String(reason).trim() ? String(reason).trim() : null,
+      relapsePlan && String(relapsePlan).trim() ? String(relapsePlan).trim() : null
     );
   const habit = db.prepare('SELECT * FROM habits WHERE id = ?').get(info.lastInsertRowid);
   res.status(201).json({ habit: habitPayload(habit) });
@@ -238,12 +333,22 @@ app.post('/api/habits', requireAuth, (req, res) => {
 app.patch('/api/habits/:id', requireAuth, (req, res) => {
   const habit = getHabitForUser(Number(req.params.id), req.user.id);
   if (!habit) return res.status(404).json({ error: 'Habit not found.' });
-  const { name, dailyCost, costUnit, dailyTime } = req.body || {};
-  db.prepare('UPDATE habits SET name = ?, daily_cost = ?, cost_unit = ?, daily_time = ? WHERE id = ?').run(
+  const { name, dailyCost, costUnit, dailyTime, unitsPerDay, triggerTimes, reason, relapsePlan } = req.body || {};
+  db.prepare(
+    'UPDATE habits SET name = ?, daily_cost = ?, cost_unit = ?, daily_time = ?, units_per_day = ?, trigger_times = ?, reason = ?, relapse_plan = ? WHERE id = ?'
+  ).run(
     name != null ? String(name).trim() : habit.name,
     dailyCost != null && dailyCost > 0 ? dailyCost : habit.daily_cost,
     costUnit != null ? costUnit : habit.cost_unit,
     dailyTime != null && dailyTime > 0 ? dailyTime : habit.daily_time,
+    unitsPerDay != null && unitsPerDay > 0 ? unitsPerDay : habit.units_per_day,
+    Array.isArray(triggerTimes) && triggerTimes.length > 0
+      ? JSON.stringify(triggerTimes)
+      : Array.isArray(triggerTimes)
+        ? null
+        : habit.trigger_times,
+    reason != null ? (String(reason).trim() || null) : habit.reason,
+    relapsePlan != null ? (String(relapsePlan).trim() || null) : habit.relapse_plan,
     habit.id
   );
   const updated = db.prepare('SELECT * FROM habits WHERE id = ?').get(habit.id);
@@ -261,10 +366,10 @@ app.get('/api/habits/:id', requireAuth, (req, res) => {
   const habit = getHabitForUser(Number(req.params.id), req.user.id);
   if (!habit) return res.status(404).json({ error: 'Habit not found.' });
   const checkins = db
-    .prepare('SELECT date, status, note FROM checkins WHERE habit_id = ? ORDER BY date DESC')
+    .prepare('SELECT date, status, note, forgiven FROM checkins WHERE habit_id = ? ORDER BY date DESC')
     .all(habit.id);
   const urges = db
-    .prepare('SELECT id, logged_at, intensity, trigger, resisted FROM urges WHERE habit_id = ? ORDER BY logged_at DESC')
+    .prepare('SELECT id, logged_at, intensity, trigger, trigger_type, action, resisted FROM urges WHERE habit_id = ? ORDER BY logged_at DESC')
     .all(habit.id);
   const journals = db
     .prepare('SELECT id, date, content FROM journals WHERE habit_id = ? ORDER BY date DESC, id DESC')
@@ -339,16 +444,63 @@ app.post('/api/habits/:id/checkin', requireAuth, (req, res) => {
   const key = date && /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : todayKey();
   db.prepare(
     `INSERT INTO checkins (habit_id, date, status, note) VALUES (?, ?, ?, ?)
-     ON CONFLICT (habit_id, date) DO UPDATE SET status = excluded.status, note = excluded.note`
+     ON CONFLICT (habit_id, date) DO UPDATE SET status = excluded.status, note = excluded.note, forgiven = 0`
   ).run(habit.id, key, status, note ? String(note).trim() : null);
 
   let newBadge = null;
+  let newShields = 0;
   if (status === 'clean') {
     const stats = getStatsForHabit(habit);
     const earned = awardBadges(habit.id, stats.currentStreak);
     if (earned.length > 0) newBadge = earned[earned.length - 1];
+    const blocks = Math.floor(stats.totalClean / 7);
+    const prevBlocks = Math.floor((stats.totalClean - 1) / 7);
+    if (blocks > prevBlocks) {
+      newShields = blocks - prevBlocks;
+      db.prepare('UPDATE habits SET shield_tokens = shield_tokens + ? WHERE id = ?').run(newShields, habit.id);
+    }
   }
   const updated = db.prepare('SELECT * FROM habits WHERE id = ?').get(habit.id);
+  res.json({ habit: habitPayload(updated), newBadge, newShields });
+  if (newBadge) notifyMilestone(req.user.id, habit.id, newBadge.threshold).catch(() => {});
+});
+
+// Mark a slip as forgiven (keeps the streak alive) or undo that.
+app.post('/api/habits/:id/forgive', requireAuth, (req, res) => {
+  const habit = getHabitForUser(Number(req.params.id), req.user.id);
+  if (!habit) return res.status(404).json({ error: 'Habit not found.' });
+  const { date, forgiven } = req.body || {};
+  const key = date && /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : todayKey();
+  const row = db.prepare('SELECT id, status FROM checkins WHERE habit_id = ? AND date = ?').get(habit.id, key);
+  if (!row) return res.status(404).json({ error: 'No check-in exists for that date.' });
+  if (row.status !== 'slip') return res.status(400).json({ error: 'Only slips can be forgiven.' });
+  db.prepare('UPDATE checkins SET forgiven = ? WHERE id = ?').run(forgiven ? 1 : 0, row.id);
+  const updated = db.prepare('SELECT * FROM habits WHERE id = ?').get(habit.id);
+  res.json({ habit: habitPayload(updated) });
+});
+
+app.post('/api/habits/:id/shield', requireAuth, (req, res) => {
+  const habit = getHabitForUser(Number(req.params.id), req.user.id);
+  if (!habit) return res.status(404).json({ error: 'Habit not found.' });
+  if ((habit.shield_tokens || 0) < 1) {
+    return res.status(400).json({ error: 'No shield tokens available. Keep going to earn more!' });
+  }
+  const key = todayKey();
+  const existing = db.prepare('SELECT id, status FROM checkins WHERE habit_id = ? AND date = ?').get(habit.id, key);
+  if (existing && existing.status === 'slip') {
+    db.prepare('UPDATE checkins SET status = ?, forgiven = 1 WHERE id = ?').run('clean', existing.id);
+  } else {
+    db.prepare(
+      `INSERT INTO checkins (habit_id, date, status, note, forgiven) VALUES (?, ?, 'clean', NULL, 1)
+       ON CONFLICT (habit_id, date) DO UPDATE SET status = 'clean', forgiven = 1`
+    ).run(habit.id, key);
+  }
+  db.prepare('UPDATE habits SET shield_tokens = shield_tokens - 1 WHERE id = ?').run(habit.id);
+  const updated = db.prepare('SELECT * FROM habits WHERE id = ?').get(habit.id);
+  const stats = getStatsForHabit(updated);
+  const earned = awardBadges(habit.id, stats.currentStreak);
+  let newBadge = null;
+  if (earned.length > 0) newBadge = earned[earned.length - 1];
   res.json({ habit: habitPayload(updated), newBadge });
   if (newBadge) notifyMilestone(req.user.id, habit.id, newBadge.threshold).catch(() => {});
 });
@@ -359,7 +511,7 @@ app.get('/api/habits/:id/urges', requireAuth, (req, res) => {
   const habit = getHabitForUser(Number(req.params.id), req.user.id);
   if (!habit) return res.status(404).json({ error: 'Habit not found.' });
   const urges = db
-    .prepare('SELECT id, logged_at, intensity, trigger, resisted FROM urges WHERE habit_id = ? ORDER BY logged_at DESC')
+    .prepare('SELECT id, logged_at, intensity, trigger, trigger_type, action, resisted FROM urges WHERE habit_id = ? ORDER BY logged_at DESC')
     .all(habit.id);
   res.json({ urges });
 });
@@ -367,22 +519,24 @@ app.get('/api/habits/:id/urges', requireAuth, (req, res) => {
 app.post('/api/habits/:id/urges', requireAuth, (req, res) => {
   const habit = getHabitForUser(Number(req.params.id), req.user.id);
   if (!habit) return res.status(404).json({ error: 'Habit not found.' });
-  const { intensity, trigger, resisted, loggedAt } = req.body || {};
+  const { intensity, trigger, triggerType, action, resisted, loggedAt } = req.body || {};
   if (!Number.isInteger(intensity) || intensity < 1 || intensity > 5) {
     return res.status(400).json({ error: 'Intensity must be between 1 and 5.' });
   }
   const info = db
     .prepare(
-      'INSERT INTO urges (habit_id, logged_at, intensity, trigger, resisted) VALUES (?, ?, ?, ?, ?)'
+      'INSERT INTO urges (habit_id, logged_at, intensity, trigger, trigger_type, action, resisted) VALUES (?, ?, ?, ?, ?, ?, ?)'
     )
     .run(
       habit.id,
       loggedAt || new Date().toISOString(),
       intensity,
       trigger ? String(trigger).trim() : null,
+      triggerType ? String(triggerType).trim() : null,
+      action ? String(action).trim() : null,
       resisted ? 1 : 0
     );
-  const urge = db.prepare('SELECT id, logged_at, intensity, trigger, resisted FROM urges WHERE id = ?').get(info.lastInsertRowid);
+  const urge = db.prepare('SELECT id, logged_at, intensity, trigger, trigger_type, action, resisted FROM urges WHERE id = ?').get(info.lastInsertRowid);
   res.status(201).json({ urge });
   notifyUrgeTip(req.user.id, habit.id).catch(() => {});
 });
@@ -416,7 +570,7 @@ app.post('/api/habits/:id/journals', requireAuth, (req, res) => {
 
 // ---------- Days out (Premium) ----------
 
-app.get('/api/days-out', requireAuth, requirePremium, async (req, res) => {
+app.get('/api/days-out', requireAuth, async (req, res) => {
   const { lat, lon, area, radius } = req.query;
   try {
     if (lat && lon) {
@@ -434,17 +588,21 @@ app.get('/api/days-out', requireAuth, requirePremium, async (req, res) => {
   }
 });
 
-app.get('/api/days-out/ideas', requireAuth, requirePremium, (req, res) => {
+app.get('/api/days-out/ideas', requireAuth, (req, res) => {
   res.json({ ideas: GENERIC_IDEAS });
 });
 
 // ---------- AI routes ----------
 
-registerAiRoutes(app, { requireAuth, requirePremium, habitForUser: getHabitForUser });
+registerAiRoutes(app, { requireAuth, habitForUser: getHabitForUser });
+
+// ---------- Community ----------
+
+  registerCommunityRoutes(app, { requireAuth, requireAdmin, habitForUser: getHabitForUser });
 
 // ---------- Premium features ----------
 
-registerPremiumRoutes(app, { requireAuth, requirePremium, habitForUser: getHabitForUser });
+registerPremiumRoutes(app, { requireAuth, habitForUser: getHabitForUser });
 
 // ---------- Admin routes ----------
 
@@ -463,8 +621,87 @@ app.put('/api/settings/notifications', requireAuth, (req, res) => {
   for (const key of Object.keys(DEFAULT_PREFS)) {
     if (typeof req.body?.[key] === 'boolean') prefs[key] = req.body[key];
   }
+  if (req.body?.reminderTime === null || req.body?.reminderTime === '') {
+    prefs.reminderTime = null;
+  } else if (typeof req.body?.reminderTime === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(req.body.reminderTime)) {
+    prefs.reminderTime = req.body.reminderTime;
+  } else if (req.body?.reminderTime != null) {
+    return res.status(400).json({ error: 'Reminder time must be in 24-hour HH:MM format.' });
+  }
   db.prepare('UPDATE users SET notification_prefs = ? WHERE id = ?').run(JSON.stringify(prefs), req.user.id);
   res.json({ prefs });
+});
+
+app.post('/api/push/schedule-trigger', requireAuth, (req, res) => {
+  const { habitId, bucketLabel, bucketStartHour } = req.body || {};
+  if (!habitId || !bucketLabel || bucketStartHour == null) {
+    return res.status(400).json({ error: 'habitId, bucketLabel and bucketStartHour are required.' });
+  }
+  const habit = getHabitForUser(Number(habitId), req.user.id);
+  if (!habit) return res.status(404).json({ error: 'Habit not found.' });
+  if (!userPrefs(req.user.id).triggerNudges) {
+    return res.json({ ok: true, skipped: 'disabled' });
+  }
+  const user = db.prepare('SELECT id, timezone FROM users WHERE id = ?').get(req.user.id);
+  scheduleTriggerNudge(req.user.id, Number(habitId), String(bucketLabel), Number(bucketStartHour), user.timezone).catch(() => {});
+  res.json({ ok: true });
+});
+
+// ---------- Health tracking (manual entry) ----------
+
+function healthSample(row) {
+  return row
+    ? { date: row.date, steps: row.steps, sleepHours: row.sleep_hours, restingHr: row.resting_hr, notes: row.notes }
+    : null;
+}
+
+app.get('/api/health', requireAuth, (req, res) => {
+  const habitId = Number(req.query.habitId);
+  const days = Math.min(Number(req.query.days) || 30, 90);
+  if (!habitId) return res.status(400).json({ error: 'habitId is required.' });
+  const habit = getHabitForUser(habitId, req.user.id);
+  if (!habit) return res.status(404).json({ error: 'Habit not found.' });
+  const since = addDays(todayKey(), -(days - 1));
+  const samples = db
+    .prepare('SELECT date, steps, sleep_hours, resting_hr, notes FROM health_samples WHERE habit_id = ? AND date >= ? ORDER BY date ASC')
+    .all(habitId, since);
+  res.json({ samples: samples.map(healthSample) });
+});
+
+app.post('/api/health', requireAuth, (req, res) => {
+  const habit = getHabitForUser(Number(req.body?.habitId), req.user.id);
+  if (!habit) return res.status(404).json({ error: 'Habit not found.' });
+  const key = /^\d{4}-\d{2}-\d{2}$/.test(req.body?.date) ? req.body.date : todayKey();
+  const steps = req.body?.steps == null || req.body.steps === '' ? null : Number(req.body.steps);
+  const sleepH = req.body?.sleepHours == null || req.body.sleepHours === '' ? null : Number(req.body.sleepHours);
+  const hr = req.body?.restingHr == null || req.body.restingHr === '' ? null : Number(req.body.restingHr);
+  if (steps != null && (!Number.isFinite(steps) || steps < 0 || steps > 200000)) return res.status(400).json({ error: 'Steps must be between 0 and 200,000.' });
+  if (sleepH != null && (!Number.isFinite(sleepH) || sleepH < 0 || sleepH > 24)) return res.status(400).json({ error: 'Sleep hours must be between 0 and 24.' });
+  if (hr != null && (!Number.isInteger(hr) || hr < 30 || hr > 220)) return res.status(400).json({ error: 'Resting heart rate must be a whole number between 30 and 220.' });
+  db.prepare(
+    `INSERT INTO health_samples (habit_id, date, steps, sleep_hours, resting_hr, notes) VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(habit_id, date) DO UPDATE SET
+       steps = excluded.steps, sleep_hours = excluded.sleep_hours, resting_hr = excluded.resting_hr, notes = excluded.notes,
+       updated_at = datetime('now')`
+  ).run(habit.id, key, steps, sleepH, hr, req.body?.notes ? String(req.body.notes).trim() : null);
+  const row = db.prepare('SELECT date, steps, sleep_hours, resting_hr, notes FROM health_samples WHERE habit_id = ? AND date = ?').get(habit.id, key);
+  res.json({ sample: healthSample(row) });
+});
+
+// ---------- Milestone sharing (landing-page social proof counter) ----------
+
+app.post('/api/shares', requireAuth, (req, res) => {
+  const habit = getHabitForUser(Number(req.body?.habitId), req.user.id);
+  if (!habit) return res.status(404).json({ error: 'Habit not found.' });
+  const d = Math.min(Math.max(Number(req.body?.days) || 0, 0), 3650);
+  db.prepare('INSERT INTO milestone_shares (user_id, habit_id, days) VALUES (?, ?, ?)').run(req.user.id, habit.id, d);
+  const total = Number(db.prepare('SELECT COUNT(*) AS n FROM milestone_shares').get().n);
+  res.json({ ok: true, total });
+});
+
+app.get('/api/shares/total', (req, res) => {
+  const total = Number(db.prepare('SELECT COUNT(*) AS n FROM milestone_shares').get().n);
+  res.json({ total });
 });
 
 // ---------- Client-side error reporting ----------
@@ -550,7 +787,7 @@ app.get('/api/habits/:id/export', requireAuth, (req, res) => {
   const habit = getHabitForUser(Number(req.params.id), req.user.id);
   if (!habit) return res.status(404).json({ error: 'Habit not found.' });
   const checkins = db
-    .prepare('SELECT date, status, note FROM checkins WHERE habit_id = ? ORDER BY date ASC')
+    .prepare('SELECT date, status, note, forgiven FROM checkins WHERE habit_id = ? ORDER BY date ASC')
     .all(habit.id);
   const daily = db
     .prepare('SELECT date, energy, sleep, mood FROM daily_checkins WHERE habit_id = ? ORDER BY date ASC')
@@ -572,7 +809,7 @@ app.get('/api/habits/:id/export', requireAuth, (req, res) => {
   res.write('\r\n');
   res.write(`${csvRow('date', 'type', 'value', 'details')}\r\n`);
   for (const c of checkins) {
-    res.write(`${csvRow(c.date, 'checkin', c.status, c.note)}\r\n`);
+    res.write(`${csvRow(c.date, 'checkin', c.status, `${c.note || ''}${c.forgiven ? ' (forgiven)' : ''}`)}\r\n`);
   }
   for (const d of daily) {
     res.write(`${csvRow(d.date, 'wellness', `energy ${d.energy}/5 · sleep ${d.sleep}/5 · mood ${d.mood}/5`, '')}\r\n`);
@@ -584,6 +821,59 @@ app.get('/api/habits/:id/export', requireAuth, (req, res) => {
     res.write(`${csvRow(j.date, 'journal', '', j.content)}\r\n`);
   }
   res.end();
+});
+
+// ---------- Full account export (GDPR) ----------
+
+app.get('/api/me/export', requireAuth, (req, res) => {
+  const user = db.prepare('SELECT id, email, role, username, timezone, buddy_opt_in FROM users WHERE id = ?').get(req.user.id);
+  if (!user) return res.status(404).json({ error: 'User not found.' });
+  const subscription = db.prepare('SELECT plan, status, started_at, renews_at FROM subscriptions WHERE user_id = ?').get(req.user.id) || null;
+  const habitsRows = db.prepare('SELECT * FROM habits WHERE user_id = ? ORDER BY id').all(req.user.id);
+  const habits = habitsRows.map((h) => ({
+    name: h.name,
+    startDate: h.start_date,
+    dailyCost: h.daily_cost,
+    costUnit: h.cost_unit,
+    dailyTime: h.daily_time,
+    unitsPerDay: h.units_per_day,
+    triggerTimes: parseTriggerTimes(h.trigger_times),
+    reason: h.reason,
+    relapsePlan: h.relapse_plan,
+    checkins: db.prepare('SELECT date, status, note, forgiven FROM checkins WHERE habit_id = ? ORDER BY date').all(h.id),
+    urges: db.prepare('SELECT logged_at, intensity, trigger, trigger_type, action, resisted FROM urges WHERE habit_id = ? ORDER BY logged_at').all(h.id),
+    journals: db.prepare('SELECT date, content FROM journals WHERE habit_id = ? ORDER BY date').all(h.id),
+    dailyCheckins: db.prepare('SELECT date, energy, sleep, mood FROM daily_checkins WHERE habit_id = ? ORDER BY date').all(h.id),
+    badges: db.prepare('SELECT threshold, earned_date FROM badges WHERE habit_id = ? ORDER BY threshold').all(h.id),
+  }));
+  const posts = db.prepare('SELECT id, content, habit_name, streak, badge, created_at FROM community_posts WHERE user_id = ? ORDER BY id').all(req.user.id);
+  const comments = db.prepare('SELECT id, post_id, content, created_at FROM community_comments WHERE user_id = ? ORDER BY id').all(req.user.id);
+  const reactions = db.prepare('SELECT post_id, emoji, created_at FROM community_reactions WHERE user_id = ? ORDER BY post_id').all(req.user.id);
+  const follows = db.prepare('SELECT following_id, created_at FROM community_follows WHERE follower_id = ? ORDER BY following_id').all(req.user.id);
+  const pushSubs = db.prepare('SELECT endpoint, last_seen FROM push_subscriptions WHERE user_id = ? ORDER BY id').all(req.user.id);
+  res.json({
+    exportedAt: new Date().toISOString(),
+    profile: user,
+    subscription,
+    habits,
+    community: { posts, comments, reactions, follows },
+    pushSubscriptions: pushSubs,
+  });
+});
+
+// ---------- Account deletion (GDPR) ----------
+
+app.delete('/api/me', requireAuth, (req, res) => {
+  const exists = db.prepare('SELECT id FROM users WHERE id = ?').get(req.user.id);
+  if (!exists) return res.status(404).json({ error: 'User not found.' });
+  const journalIds = db
+    .prepare('SELECT j.id FROM journals j JOIN habits h ON h.id = j.habit_id WHERE h.user_id = ?')
+    .all(req.user.id);
+  for (const j of journalIds) {
+    db.prepare('DELETE FROM journals_fts WHERE rowid = ?').run(j.id);
+  }
+  db.prepare('DELETE FROM users WHERE id = ?').run(req.user.id);
+  res.json({ ok: true });
 });
 
 // ---------- Admin seed ----------
@@ -651,6 +941,15 @@ setInterval(backupDatabase, 24 * 60 * 60 * 1000).unref();
 
 cleanupStaleSubscriptions();
 setInterval(cleanupStaleSubscriptions, 6 * 60 * 60 * 1000).unref();
+
+// Re-engagement cascade + weekly digest sweep (parity with the worker cron).
+setInterval(() => {
+  void evaluateAllEngagement().catch((e) => console.error('engagement sweep failed:', e.message));
+}, 30 * 60 * 1000).unref();
+
+setInterval(() => {
+  void sweepTriggerNudges().catch((e) => console.error('trigger nudge sweep failed:', e.message));
+}, 60 * 1000).unref();
 
 app.listen(PORT, () => {
   console.log(`BreakFree server running on http://localhost:${PORT}`);

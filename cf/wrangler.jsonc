@@ -18,7 +18,14 @@
       "migrations_dir": "migrations"
     }
   ],
+  "ai": {
+    "binding": "AI"
+  },
   "vars": {
-    "ADMIN_EMAIL": "admin@breakfree.app"
+    "ADMIN_EMAIL": "admin@breakfree.app",
+    "ADMIN_PASSWORD": "admin12345"
+  },
+  "triggers": {
+    "crons": ["0 * * * *"]
   }
 }

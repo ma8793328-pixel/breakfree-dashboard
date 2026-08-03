@@ -18,21 +18,30 @@ export function addDays(key, n) {
   return dateKey(dt);
 }
 
-export function computeStats(checkins, dailyCost, dailyTime) {
+export function computeStats(checkins, dailyCost, dailyTime, unitsPerDay) {
   const status = new Map();
-  for (const c of checkins) status.set(c.date, c.status);
+  const forgiven = new Set();
+  for (const c of checkins) {
+    status.set(c.date, c.status);
+    if (c.forgiven) forgiven.add(c.date);
+  }
+
+  // A forgiven slip still happened (it counts as a slip) but doesn't break the
+  // streak — a grace day, not a verdict.
+  const isClean = (date) => {
+    const s = status.get(date);
+    if (s === 'clean') return true;
+    if (s === 'slip' && forgiven.has(date)) return true;
+    return false;
+  };
 
   const today = todayKey();
   const yesterday = addDays(today, -1);
 
   let currentStreak = 0;
-  let cursor = status.get(today) === 'clean'
-    ? today
-    : status.get(yesterday) === 'clean'
-      ? yesterday
-      : null;
+  let cursor = isClean(today) ? today : isClean(yesterday) ? yesterday : null;
   while (cursor) {
-    if (status.get(cursor) === 'clean') {
+    if (isClean(cursor)) {
       currentStreak += 1;
       cursor = addDays(cursor, -1);
     } else {
@@ -48,7 +57,7 @@ export function computeStats(checkins, dailyCost, dailyTime) {
     let run = 0;
     let d = first;
     while (d <= last) {
-      if (status.get(d) === 'clean') {
+      if (isClean(d)) {
         run += 1;
         if (run > longestStreak) longestStreak = run;
       } else {
@@ -60,12 +69,23 @@ export function computeStats(checkins, dailyCost, dailyTime) {
 
   let totalClean = 0;
   let totalSlips = 0;
-  for (const s of status.values()) {
+  let forgivenSlips = 0;
+  for (const [date, s] of status.entries()) {
     if (s === 'clean') totalClean += 1;
-    else totalSlips += 1;
+    else {
+      totalSlips += 1;
+      if (forgiven.has(date)) forgivenSlips += 1;
+    }
+  }
+
+  // Rolling window: effective clean days out of the last 14 calendar days.
+  let recentClean = 0;
+  for (let i = 0; i < 14; i++) {
+    if (isClean(addDays(today, -i))) recentClean += 1;
   }
 
   const todayStatus = status.get(today) || null;
+  const todayForgiven = forgiven.has(today);
 
   return {
     currentStreak,
@@ -73,8 +93,12 @@ export function computeStats(checkins, dailyCost, dailyTime) {
     totalDays: totalClean + totalSlips,
     totalClean,
     totalSlips,
+    forgivenSlips,
+    recentClean,
     moneySaved: dailyCost ? +(currentStreak * dailyCost).toFixed(2) : 0,
     timeSaved: dailyTime ? +(currentStreak * dailyTime).toFixed(1) : 0,
+    unitsAvoided: unitsPerDay && unitsPerDay > 0 ? Math.round(unitsPerDay * totalClean) : 0,
     todayStatus,
+    todayForgiven,
   };
 }

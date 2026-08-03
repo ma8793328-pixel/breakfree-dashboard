@@ -71,6 +71,11 @@ export default function AuthPage({ mode }) {
           <button className="btn btn-primary btn-block mt" type="submit" disabled={busy}>
             {busy ? 'One moment...' : isLogin ? 'Log in' : 'Create account'}
           </button>
+          {!isLogin && (
+            <p className="hint small" style={{ marginTop: 10, textAlign: 'center', color: 'var(--muted-2)' }}>
+              No credit card needed. Every feature is included.
+            </p>
+          )}
         </form>
         <p className="center muted small mt">
           {isLogin ? (

@@ -2,13 +2,22 @@
 
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
-import { computeStats, BADGE_THRESHOLDS, todayKey, dateKey } from './stats.js';
+import { computeStats, BADGE_THRESHOLDS, todayKey, dateKey, addDays } from './stats.js';
 import { hashPassword, verifyPassword, signToken, verifyToken, randomHex } from './auth.js';
 import { registerAiRoutes } from './ai.js';
 import { buildReport, buildRecoveryPlan } from './premium.js';
 import { sendPush, loadOrCreateVapid } from './push.js';
 import { createCheckout, retrieveSession, cancelStripeSubscription, verifyWebhookSignature } from './stripe.js';
 import { findNearby, geocodeArea, GENERIC_IDEAS } from './daysout.js';
+import { evaluateUserEngagement, evaluateAllEngagement } from './engage.js';
+import { checkHealth as checkOpenAI } from './openai.js';
+
+// The "Day 3–7 wall": a high-support window where survival-mode messaging and
+// extra nudges kick in. After day 7 the worst of acute withdrawal is behind.
+function wallInfo(stats) {
+  const day = stats?.currentStreak || 0;
+  return { active: day >= 3 && day <= 7, day };
+}
 
 const PRICE_CENTS = 499;
 const FREE_HABIT_LIMIT = 1;
@@ -27,23 +36,28 @@ app.use('/api/*', async (c, next) => {
   const token = header.startsWith('Bearer ') ? header.slice(7) : null;
   if (token) {
     const user = await verifyToken(token, c.env.JWT_SECRET);
-    if (user) c.set('user', user);
+    if (user) {
+      // Re-check the account still exists so deleted accounts lose access
+      // immediately rather than when their token expires.
+      const existing = await c.env.DB.prepare('SELECT id FROM users WHERE id = ?').bind(user.id).first();
+      if (existing) {
+        c.set('user', user);
+        // Fire-and-forget: re-engagement cascade + Sunday digest. Cheap because
+        // it short-circuits when the user checked in today (and is de-duped).
+        c.executionCtx.waitUntil(evaluateUserEngagement(c.env, user.id).catch(() => {}));
+      }
+    }
   }
   await next();
 });
-
-async function isPremium(env, userId) {
-  const row = await env.DB.prepare('SELECT plan, status FROM subscriptions WHERE user_id = ?').bind(userId).first();
-  return !!row && row.plan === 'premium' && row.status === 'active';
-}
 
 async function habitOf(env, habitId, userId) {
   return env.DB.prepare('SELECT * FROM habits WHERE id = ? AND user_id = ?').bind(Number(habitId), userId).first();
 }
 
 async function habitPayload(env, habit) {
-  const checkins = (await env.DB.prepare('SELECT date, status FROM checkins WHERE habit_id = ?').bind(habit.id).all()).results;
-  const stats = computeStats(checkins, habit.daily_cost, habit.daily_time);
+  const checkins = (await env.DB.prepare('SELECT date, status, forgiven FROM checkins WHERE habit_id = ?').bind(habit.id).all()).results;
+  const stats = computeStats(checkins, habit.daily_cost, habit.daily_time, habit.units_per_day);
   const badges = (await env.DB.prepare('SELECT threshold, earned_date FROM badges WHERE habit_id = ? ORDER BY threshold').bind(habit.id).all()).results;
   return {
     id: habit.id,
@@ -52,7 +66,13 @@ async function habitPayload(env, habit) {
     dailyCost: habit.daily_cost,
     costUnit: habit.cost_unit,
     dailyTime: habit.daily_time,
+    unitsPerDay: habit.units_per_day,
+    triggerTimes: parseTriggerTimes(habit.trigger_times),
+    reason: habit.reason,
+    relapsePlan: habit.relapse_plan,
+    shieldTokens: habit.shield_tokens || 0,
     stats,
+    wall: wallInfo(stats),
     badges,
   };
 }
@@ -73,7 +93,7 @@ async function awardBadges(db, habitId, streak) {
 // Fire-and-forget nudge, gated on the user's notification preferences.
 async function maybeNotify(ctx, userId, habitId, prefKey, payload) {
   try {
-    const prefs = { dailyReminder: true, urgeTips: true, milestones: true };
+    const prefs = { dailyReminder: true, urgeTips: true, milestones: true, triggerNudges: true };
     const user = await ctx.env.DB.prepare('SELECT notification_prefs FROM users WHERE id = ?').bind(userId).first();
     if (user?.notification_prefs) Object.assign(prefs, JSON.parse(user.notification_prefs));
     if (!prefs[prefKey]) return;
@@ -98,6 +118,15 @@ function publicUser(u) {
   return { id: u.id, email: u.email, role: u.role };
 }
 
+function parseTriggerTimes(raw) {
+  try {
+    const arr = JSON.parse(raw || '[]');
+    return Array.isArray(arr) ? arr : [];
+  } catch {
+    return [];
+  }
+}
+
 function dateFromStr(date) {
   return /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : todayKey();
 }
@@ -116,7 +145,21 @@ app.post('/api/auth/signup', async (c) => {
   const hash = await hashPassword(password);
   const info = await c.env.DB.prepare('INSERT INTO users (email, password_hash) VALUES (?, ?)').bind(em, hash).run();
   const user = { id: Number(info.meta.last_row_id), email: em, role: 'user' };
+  // Every new account starts with a 7-day Premium trial.
+  await c.env.DB.prepare(
+    `INSERT INTO subscriptions (user_id, plan, status, started_at, renews_at)
+     VALUES (?, 'premium', 'trial', datetime('now'), datetime('now', '+7 days'))
+     ON CONFLICT(user_id) DO NOTHING`
+  ).bind(user.id).run();
   const token = await signToken(user, c.env.JWT_SECRET);
+  // Best-guess timezone from the sign-up IP (Cloudflare geolocates it). The client
+  // overwrites this with the exact IANA zone on the next visit.
+  try {
+    const cfTz = c.req.raw.cf?.timezone || c.req.cf?.timezone;
+    if (cfTz) await c.env.DB.prepare('UPDATE users SET timezone = ? WHERE id = ?').bind(String(cfTz).slice(0, 64), user.id).run();
+  } catch (e) {
+    console.error('timezone inference failed:', e.message);
+  }
   return c.json({ token, user: publicUser(user) }, 201);
 });
 
@@ -156,13 +199,14 @@ app.get('/api/subscription', async (c) => {
   const u = userOf(c);
   if (!u) return c.json({ error: 'Not authenticated' }, 401);
   const row = await c.env.DB.prepare('SELECT plan, status, started_at, renews_at FROM subscriptions WHERE user_id = ?').bind(u.id).first();
-  const active = !!row && row.plan === 'premium' && row.status === 'active';
+  const active = row?.plan === 'premium' && row?.status === 'active';
   return c.json({
     subscription: {
       plan: row?.plan || 'free',
       status: row?.status || 'free',
       active,
-      habitLimit: active ? Infinity : FREE_HABIT_LIMIT,
+      trial: false,
+      habitLimit: Infinity,
       startedAt: row?.started_at || null,
       renewsAt: row?.renews_at || null,
     },
@@ -173,21 +217,9 @@ app.get('/api/subscription', async (c) => {
 app.post('/api/subscription/checkout', async (c) => {
   const u = userOf(c);
   if (!u) return c.json({ error: 'Not authenticated' }, 401);
-  if (await isPremium(c.env, u.id)) return c.json({ alreadyPremium: true, sessionId: null, priceCents: PRICE_CENTS });
-  if (stripeConfigured(c.env)) {
-    try {
-      const user = await c.env.DB.prepare('SELECT email FROM users WHERE id = ?').bind(u.id).first();
-      const origin = new URL(c.req.url).origin;
-      const session = await createCheckout(c.env, { userId: u.id, email: user?.email, origin });
-      return c.json({ session: { ...session, mode: 'stripe' } });
-    } catch (e) {
-      return c.json({ error: String(e.message || 'Stripe checkout unavailable.') }, 502);
-    }
-  }
-  // Simulated fallback (no STRIPE_SECRET_KEY configured).
-  const sessionId = randomHex(16);
-  await c.env.DB.prepare('INSERT INTO checkout_sessions (id, user_id, price_cents, status) VALUES (?, ?, ?, ?)').bind(sessionId, u.id, PRICE_CENTS, 'pending').run();
-  return c.json({ session: { id: sessionId, priceCents: PRICE_CENTS, currency: 'usd', mode: 'demo' } });
+  await activateSubscription(c.env, u.id);
+  const sub = await c.env.DB.prepare('SELECT plan, status, renews_at FROM subscriptions WHERE user_id = ?').bind(u.id).first();
+  return c.json({ alreadyPremium: true, subscription: sub });
 });
 
 app.post('/api/subscription/complete', async (c) => {
@@ -270,16 +302,23 @@ app.get('/api/habits', async (c) => {
 app.post('/api/habits', async (c) => {
   const u = userOf(c);
   if (!u) return c.json({ error: 'Not authenticated' }, 401);
-  const { name, startDate, dailyCost, costUnit, dailyTime } = await c.req.json().catch(() => ({}));
+  const { name, startDate, dailyCost, costUnit, dailyTime, unitsPerDay, triggerTimes, reason, relapsePlan } = await c.req.json().catch(() => ({}));
   if (!name || !String(name).trim()) return c.json({ error: 'Habit name is required.' }, 400);
   if (!startDate || !/^\d{4}-\d{2}-\d{2}$/.test(startDate)) return c.json({ error: 'A valid start date is required.' }, 400);
-  if (!(await isPremium(c.env, u.id))) {
-    const existing = await c.env.DB.prepare('SELECT COUNT(*) AS n FROM habits WHERE user_id = ?').bind(u.id).first();
-    if ((existing?.n || 0) >= FREE_HABIT_LIMIT) return c.json({ error: `The free plan includes ${FREE_HABIT_LIMIT} habit. Upgrade to add more.`, code: 'PLAN_LIMIT' }, 402);
-  }
   const info = await c.env.DB.prepare(
-    'INSERT INTO habits (user_id, name, start_date, daily_cost, cost_unit, daily_time) VALUES (?, ?, ?, ?, ?, ?)'
-  ).bind(u.id, String(name).trim(), startDate, dailyCost && dailyCost > 0 ? dailyCost : null, costUnit || 'day', dailyTime && dailyTime > 0 ? dailyTime : null).run();
+    'INSERT INTO habits (user_id, name, start_date, daily_cost, cost_unit, daily_time, units_per_day, trigger_times, reason, relapse_plan) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+  ).bind(
+    u.id,
+    String(name).trim(),
+    startDate,
+    dailyCost && dailyCost > 0 ? dailyCost : null,
+    costUnit || 'day',
+    dailyTime && dailyTime > 0 ? dailyTime : null,
+    unitsPerDay && unitsPerDay > 0 ? unitsPerDay : null,
+    Array.isArray(triggerTimes) && triggerTimes.length > 0 ? JSON.stringify(triggerTimes) : null,
+    reason && String(reason).trim() ? String(reason).trim() : null,
+    relapsePlan && String(relapsePlan).trim() ? String(relapsePlan).trim() : null
+  ).run();
   const habit = await c.env.DB.prepare('SELECT * FROM habits WHERE id = ?').bind(Number(info.meta.last_row_id)).first();
   return c.json({ habit: await habitPayload(c.env, habit) }, 201);
 });
@@ -289,8 +328,8 @@ app.get('/api/habits/:id', async (c) => {
   if (!u) return c.json({ error: 'Not authenticated' }, 401);
   const habit = await habitOf(c.env, c.req.param('id'), u.id);
   if (!habit) return c.json({ error: 'Habit not found.' }, 404);
-  const checkins = (await c.env.DB.prepare('SELECT date, status, note FROM checkins WHERE habit_id = ? ORDER BY date DESC').bind(habit.id).all()).results;
-  const urges = (await c.env.DB.prepare('SELECT id, logged_at, intensity, trigger, resisted FROM urges WHERE habit_id = ? ORDER BY logged_at DESC').bind(habit.id).all()).results;
+  const checkins = (await c.env.DB.prepare('SELECT date, status, note, forgiven FROM checkins WHERE habit_id = ? ORDER BY date DESC').bind(habit.id).all()).results;
+  const urges = (await c.env.DB.prepare('SELECT id, logged_at, intensity, trigger, trigger_type, action, resisted FROM urges WHERE habit_id = ? ORDER BY logged_at DESC').bind(habit.id).all()).results;
   const journals = (await c.env.DB.prepare('SELECT id, date, content FROM journals WHERE habit_id = ? ORDER BY date DESC, id DESC').bind(habit.id).all()).results;
   const dailyCheckin = (await c.env.DB.prepare('SELECT date, energy, sleep, mood FROM daily_checkins WHERE habit_id = ? AND date = ?').bind(habit.id, todayKey()).all()).results[0] || null;
   const dailyCheckins = (await c.env.DB.prepare('SELECT date, energy, sleep, mood FROM daily_checkins WHERE habit_id = ? ORDER BY date DESC LIMIT 14').bind(habit.id).all()).results.reverse();
@@ -304,11 +343,21 @@ app.patch('/api/habits/:id', async (c) => {
   const habit = await habitOf(c.env, c.req.param('id'), u.id);
   if (!habit) return c.json({ error: 'Habit not found.' }, 404);
   const body = await c.req.json().catch(() => ({}));
-  await c.env.DB.prepare('UPDATE habits SET name = ?, daily_cost = ?, cost_unit = ?, daily_time = ? WHERE id = ?').bind(
+  await c.env.DB.prepare(
+    'UPDATE habits SET name = ?, daily_cost = ?, cost_unit = ?, daily_time = ?, units_per_day = ?, trigger_times = ?, reason = ?, relapse_plan = ? WHERE id = ?'
+  ).bind(
     body.name != null ? String(body.name).trim() : habit.name,
     body.dailyCost != null && body.dailyCost > 0 ? body.dailyCost : habit.daily_cost,
     body.costUnit != null ? body.costUnit : habit.cost_unit,
     body.dailyTime != null && body.dailyTime > 0 ? body.dailyTime : habit.daily_time,
+    body.unitsPerDay != null && body.unitsPerDay > 0 ? body.unitsPerDay : habit.units_per_day,
+    Array.isArray(body.triggerTimes) && body.triggerTimes.length > 0
+      ? JSON.stringify(body.triggerTimes)
+      : Array.isArray(body.triggerTimes)
+        ? null
+        : habit.trigger_times,
+    body.reason != null ? (String(body.reason).trim() || null) : habit.reason,
+    body.relapsePlan != null ? (String(body.relapsePlan).trim() || null) : habit.relapse_plan,
     habit.id
   ).run();
   const updated = await c.env.DB.prepare('SELECT * FROM habits WHERE id = ?').bind(habit.id).first();
@@ -367,17 +416,68 @@ app.post('/api/habits/:id/checkin', async (c) => {
   const key = dateFromStr(date);
   await c.env.DB.prepare(
     `INSERT INTO checkins (habit_id, date, status, note) VALUES (?, ?, ?, ?)
-     ON CONFLICT(habit_id, date) DO UPDATE SET status = excluded.status, note = excluded.note`
+     ON CONFLICT(habit_id, date) DO UPDATE SET status = excluded.status, note = excluded.note, forgiven = 0`
   ).bind(habit.id, key, status, note ? String(note).trim() : null).run();
   let newBadge = null;
+  let newShields = 0;
   if (status === 'clean') {
-    const checkins = (await c.env.DB.prepare('SELECT date, status FROM checkins WHERE habit_id = ?').bind(habit.id).all()).results;
-    const stats = computeStats(checkins, habit.daily_cost, habit.daily_time);
-    const earned = await awardBadges(c.env, habit.id, stats.currentStreak);
+    const checkins = (await c.env.DB.prepare('SELECT date, status, forgiven FROM checkins WHERE habit_id = ?').bind(habit.id).all()).results;
+    const stats = computeStats(checkins, habit.daily_cost, habit.daily_time, habit.units_per_day);
+    const earned = await awardBadges(c.env.DB, habit.id, stats.currentStreak);
     if (earned.length > 0) newBadge = earned[earned.length - 1];
+    const blocks = Math.floor(stats.totalClean / 7);
+    const prevBlocks = Math.floor((stats.totalClean - 1) / 7);
+    if (blocks > prevBlocks) {
+      newShields = blocks - prevBlocks;
+      await c.env.DB.prepare('UPDATE habits SET shield_tokens = shield_tokens + ? WHERE id = ?').bind(newShields, habit.id).run();
+    }
   }
   if (newBadge) void maybeNotify(c, u.id, habit.id, 'milestones', { title: 'BreakFree', body: `${newBadge.threshold} days clean — milestone reached. Look how far you've come. 🎉`, habitId: habit.id });
   const updated = await c.env.DB.prepare('SELECT * FROM habits WHERE id = ?').bind(habit.id).first();
+  return c.json({ habit: await habitPayload(c.env, updated), newBadge, newShields });
+});
+
+// Forgiveness: keep a slip from breaking the current streak (grace day). The
+// slip still counts as a slip — this just means it isn't a verdict.
+app.post('/api/habits/:id/forgive', async (c) => {
+  const u = userOf(c);
+  if (!u) return c.json({ error: 'Not authenticated' }, 401);
+  const habit = await habitOf(c.env, c.req.param('id'), u.id);
+  if (!habit) return c.json({ error: 'Habit not found.' }, 404);
+  const { date, forgiven } = await c.req.json().catch(() => ({}));
+  const key = dateFromStr(date);
+  const row = await c.env.DB.prepare('SELECT status FROM checkins WHERE habit_id = ? AND date = ?').bind(habit.id, key).first();
+  if (!row) return c.json({ error: 'No check-in on that date.' }, 404);
+  await c.env.DB.prepare('UPDATE checkins SET forgiven = ? WHERE habit_id = ? AND date = ?').bind(forgiven ? 1 : 0, habit.id, key).run();
+  const updated = await c.env.DB.prepare('SELECT * FROM habits WHERE id = ?').bind(habit.id).first();
+  return c.json({ habit: await habitPayload(c.env, updated) });
+});
+
+// Spend one shield token to turn today's slip into a forgiven clean day.
+app.post('/api/habits/:id/shield', async (c) => {
+  const u = userOf(c);
+  if (!u) return c.json({ error: 'Not authenticated' }, 401);
+  const habit = await habitOf(c.env, c.req.param('id'), u.id);
+  if (!habit) return c.json({ error: 'Habit not found.' }, 404);
+  if ((habit.shield_tokens || 0) < 1) return c.json({ error: 'No shield tokens available. Keep going to earn more!' }, 400);
+  const key = todayKey();
+  const existing = await c.env.DB.prepare('SELECT id, status FROM checkins WHERE habit_id = ? AND date = ?').bind(habit.id, key).first();
+  if (existing && existing.status === 'slip') {
+    await c.env.DB.prepare('UPDATE checkins SET status = ?, forgiven = 1 WHERE id = ?').bind('clean', existing.id).run();
+  } else {
+    await c.env.DB.prepare(
+      `INSERT INTO checkins (habit_id, date, status, forgiven) VALUES (?, ?, 'clean', 1)
+       ON CONFLICT(habit_id, date) DO UPDATE SET status = 'clean', forgiven = 1`
+    ).bind(habit.id, key).run();
+  }
+  await c.env.DB.prepare('UPDATE habits SET shield_tokens = shield_tokens - 1 WHERE id = ?').bind(habit.id).run();
+  const updated = await c.env.DB.prepare('SELECT * FROM habits WHERE id = ?').bind(habit.id).first();
+  let newBadge = null;
+  const checkins = (await c.env.DB.prepare('SELECT date, status, forgiven FROM checkins WHERE habit_id = ?').bind(habit.id).all()).results;
+  const stats = computeStats(checkins, habit.daily_cost, habit.daily_time, habit.units_per_day);
+  const earned = await awardBadges(c.env.DB, habit.id, stats.currentStreak);
+  if (earned.length > 0) newBadge = earned[earned.length - 1];
+  if (newBadge) void maybeNotify(c, u.id, habit.id, 'milestones', { title: 'BreakFree', body: `${newBadge.threshold} days clean — milestone reached. Look how far you've come. 🎉`, habitId: habit.id });
   return c.json({ habit: await habitPayload(c.env, updated), newBadge });
 });
 
@@ -387,7 +487,7 @@ app.get('/api/habits/:id/urges', async (c) => {
   if (!u) return c.json({ error: 'Not authenticated' }, 401);
   const habit = await habitOf(c.env, c.req.param('id'), u.id);
   if (!habit) return c.json({ error: 'Habit not found.' }, 404);
-  const urges = (await c.env.DB.prepare('SELECT id, logged_at, intensity, trigger, resisted FROM urges WHERE habit_id = ? ORDER BY logged_at DESC').bind(habit.id).all()).results;
+  const urges = (await c.env.DB.prepare('SELECT id, logged_at, intensity, trigger, trigger_type, action, resisted FROM urges WHERE habit_id = ? ORDER BY logged_at DESC').bind(habit.id).all()).results;
   return c.json({ urges });
 });
 
@@ -396,12 +496,12 @@ app.post('/api/habits/:id/urges', async (c) => {
   if (!u) return c.json({ error: 'Not authenticated' }, 401);
   const habit = await habitOf(c.env, c.req.param('id'), u.id);
   if (!habit) return c.json({ error: 'Habit not found.' }, 404);
-  const { intensity, trigger, resisted, loggedAt } = await c.req.json().catch(() => ({}));
+  const { intensity, trigger, triggerType, action, resisted, loggedAt } = await c.req.json().catch(() => ({}));
   if (!Number.isInteger(intensity) || intensity < 1 || intensity > 5) return c.json({ error: 'Intensity must be between 1 and 5.' }, 400);
-  const info = await c.env.DB.prepare('INSERT INTO urges (habit_id, logged_at, intensity, trigger, resisted) VALUES (?, ?, ?, ?, ?)').bind(
-    habit.id, loggedAt || new Date().toISOString(), intensity, trigger ? String(trigger).trim() : null, resisted ? 1 : 0
+  const info = await c.env.DB.prepare('INSERT INTO urges (habit_id, logged_at, intensity, trigger, trigger_type, action, resisted) VALUES (?, ?, ?, ?, ?, ?, ?)').bind(
+    habit.id, loggedAt || new Date().toISOString(), intensity, trigger ? String(trigger).trim() : null, triggerType ? String(triggerType).trim() : null, action ? String(action).trim() : null, resisted ? 1 : 0
   ).run();
-  const urge = await c.env.DB.prepare('SELECT id, logged_at, intensity, trigger, resisted FROM urges WHERE id = ?').bind(Number(info.meta.last_row_id)).first();
+  const urge = await c.env.DB.prepare('SELECT id, logged_at, intensity, trigger, trigger_type, action, resisted FROM urges WHERE id = ?').bind(Number(info.meta.last_row_id)).first();
   void maybeNotify(c, u.id, habit.id, 'urgeTips', { title: 'BreakFree', body: `Urge logged. Pause 10 minutes and change your scene — it usually fades.`, habitId: habit.id });
   return c.json({ urge }, 201);
 });
@@ -435,11 +535,10 @@ app.post('/api/habits/:id/journals', async (c) => {
   return c.json({ entry }, 201);
 });
 
-// ---------- days out (premium) ----------
+// ---------- days out ----------
 app.get('/api/days-out*', async (c) => {
   const u = userOf(c);
   if (!u) return c.json({ error: 'Not authenticated' }, 401);
-  if (!(await isPremium(c.env, u.id))) return c.json({ error: 'This is a Premium feature.', code: 'PREMIUM_REQUIRED' }, 402);
   if (c.req.path.endsWith('/ideas')) return c.json({ ideas: GENERIC_IDEAS });
   const q = new URL(c.req.url).searchParams;
   const lat = q.get('lat');
@@ -460,9 +559,13 @@ app.get('/api/days-out*', async (c) => {
 });
 
 // ---------- settings ----------
+const DEFAULT_PREFS = { dailyReminder: true, urgeTips: true, milestones: true, triggerNudges: true, reminderTime: null, emailOptIn: false, digestOptIn: true, reEngageOptIn: true };
+
+const VALID_TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
+
 async function prefsFor(c, userId) {
   const user = await c.env.DB.prepare('SELECT notification_prefs FROM users WHERE id = ?').bind(userId).first();
-  const base = { dailyReminder: true, urgeTips: true, milestones: true };
+  const base = { ...DEFAULT_PREFS };
   if (user?.notification_prefs) {
     try {
       Object.assign(base, JSON.parse(user.notification_prefs));
@@ -482,11 +585,487 @@ app.put('/api/settings/notifications', async (c) => {
   if (!u) return c.json({ error: 'Not authenticated' }, 401);
   const body = await c.req.json().catch(() => ({}));
   const prefs = await prefsFor(c, u.id);
-  for (const key of ['dailyReminder', 'urgeTips', 'milestones']) {
+  for (const key of Object.keys(DEFAULT_PREFS)) {
     if (typeof body[key] === 'boolean') prefs[key] = body[key];
+  }
+  if (body.reminderTime === null || body.reminderTime === '') {
+    prefs.reminderTime = null;
+  } else if (typeof body.reminderTime === 'string' && VALID_TIME.test(body.reminderTime)) {
+    prefs.reminderTime = body.reminderTime;
+  } else if (body.reminderTime != null) {
+    return c.json({ error: 'Reminder time must be in 24-hour HH:MM format.' }, 400);
   }
   await c.env.DB.prepare('UPDATE users SET notification_prefs = ? WHERE id = ?').bind(JSON.stringify(prefs), u.id).run();
   return c.json({ prefs });
+});
+
+// ---------- health tracking (manual entry) ----------
+app.get('/api/health', async (c) => {
+  const u = userOf(c);
+  if (!u) return c.json({ error: 'Not authenticated' }, 401);
+  const q = new URL(c.req.url).searchParams;
+  const habitId = Number(q.get('habitId'));
+  const days = Math.min(Number(q.get('days')) || 30, 90);
+  if (!habitId) return c.json({ error: 'habitId is required.' }, 400);
+  const habit = await habitOf(c.env, habitId, u.id);
+  if (!habit) return c.json({ error: 'Habit not found.' }, 404);
+  const since = addDays(todayKey(), -(days - 1));
+  const samples = (await c.env.DB.prepare(
+    'SELECT date, steps, sleep_hours, resting_hr, notes FROM health_samples WHERE habit_id = ? AND date >= ? ORDER BY date ASC'
+  ).bind(habitId, since).all()).results;
+  return c.json({ samples });
+});
+
+app.post('/api/health', async (c) => {
+  const u = userOf(c);
+  if (!u) return c.json({ error: 'Not authenticated' }, 401);
+  const body = await c.req.json().catch(() => ({}));
+  const habit = await habitOf(c.env, body.habitId, u.id);
+  if (!habit) return c.json({ error: 'Habit not found.' }, 404);
+  const key = dateFromStr(body.date);
+  const steps = body.steps == null || body.steps === '' ? null : Number(body.steps);
+  const sleepH = body.sleepHours == null || body.sleepHours === '' ? null : Number(body.sleepHours);
+  const hr = body.restingHr == null || body.restingHr === '' ? null : Number(body.restingHr);
+  if (steps != null && (!Number.isFinite(steps) || steps < 0 || steps > 200000)) return c.json({ error: 'Steps must be between 0 and 200,000.' }, 400);
+  if (sleepH != null && (!Number.isFinite(sleepH) || sleepH < 0 || sleepH > 24)) return c.json({ error: 'Sleep hours must be between 0 and 24.' }, 400);
+  if (hr != null && (!Number.isInteger(hr) || hr < 30 || hr > 220)) return c.json({ error: 'Resting heart rate must be a whole number between 30 and 220.' }, 400);
+  await c.env.DB.prepare(
+    `INSERT INTO health_samples (habit_id, date, steps, sleep_hours, resting_hr, notes) VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(habit_id, date) DO UPDATE SET
+       steps = excluded.steps, sleep_hours = excluded.sleep_hours, resting_hr = excluded.resting_hr, notes = excluded.notes,
+       updated_at = datetime('now')`
+  ).bind(habit.id, key, steps, sleepH, hr, body.notes ? String(body.notes).trim() : null).run();
+  const row = (await c.env.DB.prepare(
+    'SELECT date, steps, sleep_hours, resting_hr, notes FROM health_samples WHERE habit_id = ? AND date = ?'
+  ).bind(habit.id, key).all()).results[0];
+  return c.json({ sample: row });
+});
+
+// ---------- milestone sharing (landing-page social proof counter) ----------
+app.post('/api/shares', async (c) => {
+  const u = userOf(c);
+  if (!u) return c.json({ error: 'Not authenticated' }, 401);
+  const { habitId, days } = await c.req.json().catch(() => ({}));
+  const habit = await habitOf(c.env, habitId, u.id);
+  if (!habit) return c.json({ error: 'Habit not found.' }, 404);
+  const d = Math.min(Math.max(Number(days) || 0, 0), 3650);
+  await c.env.DB.prepare('INSERT INTO milestone_shares (user_id, habit_id, days) VALUES (?, ?, ?)').bind(u.id, habit.id, d).run();
+  const total = Number((await c.env.DB.prepare('SELECT COUNT(*) AS n FROM milestone_shares').first()).n);
+  return c.json({ ok: true, total });
+});
+
+app.get('/api/shares/total', async (c) => {
+  const total = Number((await c.env.DB.prepare('SELECT COUNT(*) AS n FROM milestone_shares').first()).n);
+  return c.json({ total });
+});
+
+// ---------- community ----------
+const COMMUNITY_EMOJIS = ['💪', '🎉', '🔥', '❤️', '🫶'];
+const NAME_ADJ = ['Brave', 'Calm', 'Clever', 'Cosmic', 'Courageous', 'Dawn', 'Fierce', 'Gentle', 'Golden', 'Hopeful', 'Kind', 'Lucky', 'Mellow', 'Mighty', 'Mindful', 'Peaceful', 'Radiant', 'Resilient', 'Serene', 'Shining', 'Silent', 'Sincere', 'Steady', 'Strong', 'Sunny', 'Swift', 'Tender', 'True', 'Warm', 'Wise'];
+const NAME_NOUN = ['Bear', 'Breeze', 'Canyon', 'Cedar', 'Dove', 'Eagle', 'Fern', 'Fox', 'Harbor', 'Journey', 'Lark', 'Lotus', 'Meadow', 'Oak', 'Otter', 'Pine', 'River', 'Rose', 'Skylark', 'Spring', 'Star', 'Stone', 'Sunrise', 'Thistle', 'Valley', 'Wave', 'Willow', 'Wren'];
+
+function randomUsername() {
+  const a = NAME_ADJ[Math.floor(Math.random() * NAME_ADJ.length)];
+  const n = NAME_NOUN[Math.floor(Math.random() * NAME_NOUN.length)];
+  return `${a}${n}${Math.floor(10 + Math.random() * 90)}`;
+}
+
+function validUsername(u) {
+  return /^[a-zA-Z0-9_]{3,20}$/.test(u || '');
+}
+
+async function ensureUsername(env, userId) {
+  const user = await env.DB.prepare('SELECT username FROM users WHERE id = ?').bind(userId).first();
+  if (user?.username) return user.username;
+  for (let i = 0; i < 6; i++) {
+    const name = randomUsername();
+    try {
+      const r = await env.DB.prepare('UPDATE users SET username = ? WHERE id = ? AND username IS NULL').bind(name, userId).run();
+      if (r.meta?.changes) return name;
+    } catch { /* name collision — try again */ }
+  }
+  return 'Anonymous';
+}
+
+async function communityPosts(env, userId, feed, limit, offset) {
+  const following = feed === 'following';
+  const blocked = (await env.DB.prepare(
+    `SELECT blocked_id FROM community_blocks WHERE blocker_id = ?
+     UNION
+     SELECT blocker_id FROM community_blocks WHERE blocked_id = ?`
+  ).bind(userId, userId).all()).results;
+  const blockedIds = blocked.map((b) => b.blocked_id);
+  const blockedIn = blockedIds.length > 0 ? `p.user_id NOT IN (${blockedIds.map(() => '?').join(',')})` : '1=1';
+  let rows;
+  if (following) {
+    rows = (await env.DB.prepare(
+      `SELECT p.id, p.user_id, p.content, p.habit_name, p.streak, p.badge, p.created_at,
+              COALESCE(u.username, 'Anonymous') AS author_username,
+              (SELECT COUNT(*) FROM community_comments c WHERE c.post_id = p.id) AS comment_count
+       FROM community_posts p JOIN users u ON u.id = p.user_id
+       WHERE (p.user_id IN (SELECT following_id FROM community_follows WHERE follower_id = ?) OR p.user_id = ?)
+         AND ${blockedIn}
+       ORDER BY p.created_at DESC, p.id DESC LIMIT ? OFFSET ?`
+    ).bind(userId, userId, ...blockedIds, limit, offset).all()).results;
+  } else {
+    rows = (await env.DB.prepare(
+      `SELECT p.id, p.user_id, p.content, p.habit_name, p.streak, p.badge, p.created_at,
+              COALESCE(u.username, 'Anonymous') AS author_username,
+              (SELECT COUNT(*) FROM community_comments c WHERE c.post_id = p.id) AS comment_count
+       FROM community_posts p JOIN users u ON u.id = p.user_id
+       WHERE ${blockedIn}
+       ORDER BY p.created_at DESC, p.id DESC LIMIT ? OFFSET ?`
+    ).bind(...blockedIds, limit, offset).all()).results;
+  }
+  if (rows.length === 0) return [];
+  const ids = rows.map((r) => r.id);
+  const inClause = ids.map(() => '?').join(',');
+  const reactionRows = (await env.DB.prepare(
+    `SELECT post_id, emoji, COUNT(*) AS n FROM community_reactions WHERE post_id IN (${inClause}) GROUP BY post_id, emoji`
+  ).bind(...ids).all()).results;
+  const myReactions = (await env.DB.prepare(
+    `SELECT post_id, emoji FROM community_reactions WHERE user_id = ? AND post_id IN (${inClause})`
+  ).bind(userId, ...ids).all()).results;
+  const authorIds = [...new Set(rows.map((r) => r.user_id))];
+  const authorIn = authorIds.map(() => '?').join(',');
+  const follows = (await env.DB.prepare(
+    `SELECT following_id FROM community_follows WHERE follower_id = ? AND following_id IN (${authorIn})`
+  ).bind(userId, ...authorIds).all()).results;
+  const reactionsByPost = {};
+  for (const r of reactionRows) {
+    (reactionsByPost[r.post_id] = reactionsByPost[r.post_id] || {})[r.emoji] = Number(r.n);
+  }
+  const myByPost = Object.fromEntries(myReactions.map((r) => [r.post_id, r.emoji]));
+  const followSet = new Set(follows.map((f) => f.following_id));
+  return rows.map((r) => ({
+    id: r.id,
+    userId: r.user_id,
+    content: r.content,
+    habitName: r.habit_name,
+    streak: r.streak,
+    badge: r.badge,
+    createdAt: r.created_at,
+    author: r.author_username,
+    reactions: reactionsByPost[r.id] || {},
+    myReaction: myByPost[r.id] || null,
+    commentCount: Number(r.comment_count || 0),
+    following: followSet.has(r.user_id),
+  }));
+}
+
+app.get('/api/community/me', async (c) => {
+  const u = userOf(c);
+  if (!u) return c.json({ error: 'Not authenticated' }, 401);
+  return c.json({ username: await ensureUsername(c.env, u.id) });
+});
+
+app.put('/api/community/username', async (c) => {
+  const u = userOf(c);
+  if (!u) return c.json({ error: 'Not authenticated' }, 401);
+  const { username } = await c.req.json().catch(() => ({}));
+  const name = String(username || '').trim();
+  if (!validUsername(name)) return c.json({ error: 'Pick 3–20 letters, numbers or underscores.' }, 400);
+  const taken = await c.env.DB.prepare('SELECT id FROM users WHERE lower(username) = lower(?)').bind(name).first();
+  if (taken) return c.json({ error: 'That name is taken — try another.' }, 409);
+  await c.env.DB.prepare('UPDATE users SET username = ? WHERE id = ?').bind(name, u.id).run();
+  return c.json({ username: name });
+});
+
+app.get('/api/community/posts', async (c) => {
+  const u = userOf(c);
+  if (!u) return c.json({ error: 'Not authenticated' }, 401);
+  const q = new URL(c.req.url).searchParams;
+  const feed = q.get('feed') === 'following' ? 'following' : 'global';
+  const limit = Math.min(Number(q.get('limit')) || 50, 100);
+  const offset = Math.max(Number(q.get('offset')) || 0, 0);
+  return c.json({ posts: await communityPosts(c.env, u.id, feed, limit, offset) });
+});
+
+app.post('/api/community/posts', async (c) => {
+  const u = userOf(c);
+  if (!u) return c.json({ error: 'Not authenticated' }, 401);
+  await ensureUsername(c.env, u.id);
+  const { content, habitId } = await c.req.json().catch(() => ({}));
+  let text = String(content || '').trim();
+  let habitName = null;
+  let streak = null;
+  let badge = null;
+  if (habitId) {
+    const habit = await habitOf(c.env, habitId, u.id);
+    if (!habit) return c.json({ error: 'Habit not found.' }, 404);
+    const checkins = (await c.env.DB.prepare('SELECT date, status, forgiven FROM checkins WHERE habit_id = ?').bind(habit.id).all()).results;
+    const stats = computeStats(checkins, habit.daily_cost, habit.daily_time, habit.units_per_day);
+    habitName = habit.name;
+    streak = stats.currentStreak;
+    if (!text) {
+      text = streak > 0
+        ? `Hit a ${streak}-day clean streak with ${habit.name}. One day at a time.`
+        : `Starting over with ${habit.name}. Day one, here we go.`;
+    }
+  }
+  if (!text) return c.json({ error: 'Write something to share.' }, 400);
+  if (text.length > 280) return c.json({ error: 'Keep it under 280 characters.' }, 400);
+  const info = await c.env.DB.prepare(
+    'INSERT INTO community_posts (user_id, content, habit_name, streak, badge) VALUES (?, ?, ?, ?, ?)'
+  ).bind(u.id, text.slice(0, 280), habitName, streak, badge).run();
+  return c.json({ ok: true, postId: Number(info.meta.last_row_id) }, 201);
+});
+
+app.delete('/api/community/posts/:id', async (c) => {
+  const u = userOf(c);
+  if (!u) return c.json({ error: 'Not authenticated' }, 401);
+  const post = await c.env.DB.prepare('SELECT * FROM community_posts WHERE id = ?').bind(Number(c.req.param('id'))).first();
+  if (!post) return c.json({ error: 'Post not found.' }, 404);
+  if (post.user_id !== u.id && u.role !== 'admin') return c.json({ error: 'Not allowed.' }, 403);
+  await c.env.DB.prepare('DELETE FROM community_posts WHERE id = ?').bind(post.id).run();
+  return c.json({ ok: true });
+});
+
+app.post('/api/community/posts/:id/reactions', async (c) => {
+  const u = userOf(c);
+  if (!u) return c.json({ error: 'Not authenticated' }, 401);
+  const post = await c.env.DB.prepare('SELECT id FROM community_posts WHERE id = ?').bind(Number(c.req.param('id'))).first();
+  if (!post) return c.json({ error: 'Post not found.' }, 404);
+  const { emoji } = await c.req.json().catch(() => ({}));
+  if (!COMMUNITY_EMOJIS.includes(emoji)) return c.json({ error: 'Unsupported reaction.' }, 400);
+  await c.env.DB.prepare(
+    `INSERT INTO community_reactions (post_id, user_id, emoji) VALUES (?, ?, ?)
+     ON CONFLICT(post_id, user_id) DO UPDATE SET emoji = excluded.emoji`
+  ).bind(post.id, u.id, emoji).run();
+  return c.json({ ok: true, emoji });
+});
+
+app.delete('/api/community/posts/:id/reactions', async (c) => {
+  const u = userOf(c);
+  if (!u) return c.json({ error: 'Not authenticated' }, 401);
+  await c.env.DB.prepare('DELETE FROM community_reactions WHERE post_id = ? AND user_id = ?').bind(Number(c.req.param('id')), u.id).run();
+  return c.json({ ok: true });
+});
+
+app.get('/api/community/posts/:id/comments', async (c) => {
+  const u = userOf(c);
+  if (!u) return c.json({ error: 'Not authenticated' }, 401);
+  const post = await c.env.DB.prepare('SELECT id FROM community_posts WHERE id = ?').bind(Number(c.req.param('id'))).first();
+  if (!post) return c.json({ error: 'Post not found.' }, 404);
+  const blocked = (await c.env.DB.prepare(
+    `SELECT blocked_id FROM community_blocks WHERE blocker_id = ?
+     UNION
+     SELECT blocker_id FROM community_blocks WHERE blocked_id = ?`
+  ).bind(u.id, u.id).all()).results;
+  const blockedIds = blocked.map((b) => b.blocked_id);
+  const blockedIn = blockedIds.length > 0 ? `AND cm.user_id NOT IN (${blockedIds.map(() => '?').join(',')})` : '';
+  const comments = (await c.env.DB.prepare(
+    `SELECT cm.id, cm.content, cm.created_at, COALESCE(u.username, 'Anonymous') AS author, cm.user_id
+     FROM community_comments cm JOIN users u ON u.id = cm.user_id
+     WHERE cm.post_id = ? ${blockedIn} ORDER BY cm.created_at, cm.id`
+  ).bind(post.id, ...blockedIds).all()).results;
+  return c.json({ comments });
+});
+
+app.post('/api/community/posts/:id/comments', async (c) => {
+  const u = userOf(c);
+  if (!u) return c.json({ error: 'Not authenticated' }, 401);
+  await ensureUsername(c.env, u.id);
+  const post = await c.env.DB.prepare('SELECT id FROM community_posts WHERE id = ?').bind(Number(c.req.param('id'))).first();
+  if (!post) return c.json({ error: 'Post not found.' }, 404);
+  const { content } = await c.req.json().catch(() => ({}));
+  const text = String(content || '').trim();
+  if (!text) return c.json({ error: 'Write a comment.' }, 400);
+  if (text.length > 280) return c.json({ error: 'Keep it under 280 characters.' }, 400);
+  const info = await c.env.DB.prepare('INSERT INTO community_comments (post_id, user_id, content) VALUES (?, ?, ?)').bind(post.id, u.id, text.slice(0, 280)).run();
+  const comment = await c.env.DB.prepare(
+    `SELECT cm.id, cm.content, cm.created_at, COALESCE(u.username, 'Anonymous') AS author, cm.user_id
+     FROM community_comments cm JOIN users u ON u.id = cm.user_id WHERE cm.id = ?`
+  ).bind(Number(info.meta.last_row_id)).first();
+  return c.json({ comment }, 201);
+});
+
+app.post('/api/community/follow', async (c) => {
+  const u = userOf(c);
+  if (!u) return c.json({ error: 'Not authenticated' }, 401);
+  const { userId } = await c.req.json().catch(() => ({}));
+  const target = Number(userId);
+  if (!Number.isInteger(target) || target === u.id) return c.json({ error: 'Invalid user.' }, 400);
+  await c.env.DB.prepare('INSERT OR IGNORE INTO community_follows (follower_id, following_id) VALUES (?, ?)').bind(u.id, target).run();
+  return c.json({ ok: true, following: true });
+});
+
+app.post('/api/community/unfollow', async (c) => {
+  const u = userOf(c);
+  if (!u) return c.json({ error: 'Not authenticated' }, 401);
+  const { userId } = await c.req.json().catch(() => ({}));
+  await c.env.DB.prepare('DELETE FROM community_follows WHERE follower_id = ? AND following_id = ?').bind(u.id, Number(userId)).run();
+  return c.json({ ok: true, following: false });
+});
+
+// ---------- moderation ----------
+app.post('/api/community/report', async (c) => {
+  const u = userOf(c);
+  if (!u) return c.json({ error: 'Not authenticated' }, 401);
+  const { postId, commentId, reason } = await c.req.json().catch(() => ({}));
+  const targetId = postId ? Number(postId) : commentId ? Number(commentId) : null;
+  if (!targetId) return c.json({ error: 'Nothing to report.' }, 400);
+  const reasonText = String(reason || '').trim().slice(0, 100);
+  const allowed = ['Spam', 'Harassment', 'Self-harm', 'Inappropriate', 'Other'];
+  if (!allowed.includes(reasonText)) return c.json({ error: 'Choose a reason.' }, 400);
+  if (postId) {
+    const post = await c.env.DB.prepare('SELECT id FROM community_posts WHERE id = ?').bind(targetId).first();
+    if (!post) return c.json({ error: 'Post not found.' }, 404);
+  } else {
+    const comment = await c.env.DB.prepare('SELECT id FROM community_comments WHERE id = ?').bind(targetId).first();
+    if (!comment) return c.json({ error: 'Comment not found.' }, 404);
+  }
+  const prior = await c.env.DB.prepare(
+    `SELECT id FROM community_reports
+     WHERE reporter_id = ? AND post_id IS ? AND comment_id IS ? AND status = 'open'`
+  ).bind(u.id, postId ? targetId : null, commentId ? targetId : null).first();
+  if (prior) return c.json({ ok: true, already: true });
+  await c.env.DB.prepare(
+    `INSERT INTO community_reports (reporter_id, post_id, comment_id, reason) VALUES (?, ?, ?, ?)`
+  ).bind(u.id, postId ? targetId : null, commentId ? targetId : null, reasonText).run();
+  return c.json({ ok: true }, 201);
+});
+
+app.post('/api/community/block', async (c) => {
+  const u = userOf(c);
+  if (!u) return c.json({ error: 'Not authenticated' }, 401);
+  const { userId } = await c.req.json().catch(() => ({}));
+  const target = Number(userId);
+  if (!Number.isInteger(target) || target === u.id) return c.json({ error: 'Invalid user.' }, 400);
+  const exists = await c.env.DB.prepare('SELECT id FROM users WHERE id = ?').bind(target).first();
+  if (!exists) return c.json({ error: 'User not found.' }, 404);
+  await c.env.DB.prepare('INSERT OR IGNORE INTO community_blocks (blocker_id, blocked_id) VALUES (?, ?)').bind(u.id, target).run();
+  await c.env.DB.prepare('DELETE FROM community_follows WHERE follower_id = ? AND following_id = ?').bind(u.id, target).run();
+  return c.json({ ok: true }, 201);
+});
+
+app.get('/api/community/moderation', async (c) => {
+  const u = userOf(c);
+  if (!u) return c.json({ error: 'Not authenticated' }, 401);
+  if (u.role !== 'admin') return c.json({ error: 'Admin access required.' }, 403);
+  const reports = (await c.env.DB.prepare(
+    `SELECT r.id, r.reason, r.status, r.action, r.created_at,
+            reporter.id AS reporter_id, COALESCE(reporter.username, 'Anonymous') AS reporter,
+            COALESCE(author.id, '') AS author_id, COALESCE(author.username, '') AS author,
+            r.post_id, r.comment_id,
+            COALESCE(p.content, '') AS post_content,
+            COALESCE(cm.content, '') AS comment_content,
+            p.created_at AS post_created_at
+     FROM community_reports r
+     JOIN users reporter ON reporter.id = r.reporter_id
+     LEFT JOIN community_posts p ON p.id = r.post_id
+     LEFT JOIN community_comments cm ON cm.id = r.comment_id
+     LEFT JOIN users author ON author.id = COALESCE(p.user_id, cm.user_id)
+     ORDER BY (r.status = 'open') DESC, r.id DESC`
+  ).all()).results;
+  return c.json({ reports });
+});
+
+app.post('/api/community/moderation/:id', async (c) => {
+  const u = userOf(c);
+  if (!u) return c.json({ error: 'Not authenticated' }, 401);
+  if (u.role !== 'admin') return c.json({ error: 'Admin access required.' }, 403);
+  const report = await c.env.DB.prepare('SELECT * FROM community_reports WHERE id = ?').bind(Number(c.req.param('id'))).first();
+  if (!report) return c.json({ error: 'Report not found.' }, 404);
+  const { action } = await c.req.json().catch(() => ({}));
+  if (!['dismiss', 'remove', 'block'].includes(action)) return c.json({ error: 'Action must be dismiss, remove or block.' }, 400);
+  if (action === 'dismiss') {
+    await c.env.DB.prepare(
+      "UPDATE community_reports SET status = 'resolved', action = 'dismiss', resolved_at = datetime('now'), resolved_by = ? WHERE id = ?"
+    ).bind(u.id, report.id).run();
+    return c.json({ ok: true, action });
+  }
+  if (action === 'remove') {
+    if (report.post_id) {
+      await c.env.DB.prepare('DELETE FROM community_posts WHERE id = ?').bind(report.post_id).run();
+    } else if (report.comment_id) {
+      await c.env.DB.prepare('DELETE FROM community_comments WHERE id = ?').bind(report.comment_id).run();
+    } else {
+      return c.json({ error: 'Report has no target.' }, 400);
+    }
+    await c.env.DB.prepare(
+      "UPDATE community_reports SET status = 'resolved', action = 'remove', resolved_at = datetime('now'), resolved_by = ? WHERE id = ?"
+    ).bind(u.id, report.id).run();
+    return c.json({ ok: true, action });
+  }
+  const targetUserId = report.post_id
+    ? (await c.env.DB.prepare('SELECT user_id FROM community_posts WHERE id = ?').bind(report.post_id).first())?.user_id
+    : report.comment_id
+      ? (await c.env.DB.prepare('SELECT user_id FROM community_comments WHERE id = ?').bind(report.comment_id).first())?.user_id
+      : null;
+  if (targetUserId) {
+    const blockers = (await c.env.DB.prepare("SELECT id FROM users WHERE role != 'admin' AND id != ?").bind(targetUserId).all()).results;
+    for (const blocker of blockers) {
+      await c.env.DB.prepare('INSERT OR IGNORE INTO community_blocks (blocker_id, blocked_id) VALUES (?, ?)').bind(blocker.id, targetUserId).run();
+    }
+    await c.env.DB.prepare('DELETE FROM community_posts WHERE user_id = ?').bind(targetUserId).run();
+    await c.env.DB.prepare('DELETE FROM community_comments WHERE user_id = ?').bind(targetUserId).run();
+  }
+  await c.env.DB.prepare(
+    "UPDATE community_reports SET status = 'resolved', action = 'block', resolved_at = datetime('now'), resolved_by = ? WHERE id = ?"
+  ).bind(u.id, report.id).run();
+  return c.json({ ok: true, action });
+});
+
+// ---------- quit buddies ----------
+function normalizeHabitName(n) {
+  return String(n || '').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+// Opt in/out of finding a quit buddy.
+app.put('/api/community/buddies', async (c) => {
+  const u = userOf(c);
+  if (!u) return c.json({ error: 'Not authenticated' }, 401);
+  const { optedIn } = await c.req.json().catch(() => ({}));
+  await c.env.DB.prepare('UPDATE users SET buddy_opt_in = ? WHERE id = ?').bind(optedIn ? 1 : 0, u.id).run();
+  return c.json({ optedIn: !!optedIn });
+});
+
+// People who started a similar habit (or started around the same time) and
+// opted in to being found. Sorted with closest matches first.
+app.get('/api/community/buddies', async (c) => {
+  const u = userOf(c);
+  if (!u) return c.json({ error: 'Not authenticated' }, 401);
+  const me = await c.env.DB.prepare('SELECT buddy_opt_in FROM users WHERE id = ?').bind(u.id).first();
+  const optedIn = Number(me?.buddy_opt_in || 0) === 1;
+  const myHabits = (await c.env.DB.prepare('SELECT name, start_date FROM habits WHERE user_id = ? ORDER BY start_date').bind(u.id).all()).results;
+  const myPrimary = myHabits[0] || null;
+  if (!myPrimary) return c.json({ optedIn, buddies: [] });
+  const myName = normalizeHabitName(myPrimary.name);
+  const myStart = myPrimary.start_date;
+
+  const candidates = (await c.env.DB.prepare(
+    'SELECT id, username FROM users WHERE buddy_opt_in = 1 AND id != ? AND username IS NOT NULL'
+  ).bind(u.id).all()).results;
+
+  const buddies = [];
+  for (const cand of candidates) {
+    const ch = (await c.env.DB.prepare(
+      'SELECT name, start_date, id FROM habits WHERE user_id = ? ORDER BY ABS(julianday(start_date) - julianday(?)) LIMIT 1'
+    ).bind(cand.id, myStart).all()).results[0];
+    if (!ch) continue;
+    const sameName = normalizeHabitName(ch.name) === myName;
+    const daysDiff = Math.abs(Math.round((new Date(ch.start_date) - new Date(myStart)) / 86400000));
+    const startClose = daysDiff <= 21;
+    const match = sameName && startClose ? 'both' : sameName ? 'habit' : startClose ? 'start' : null;
+    if (!match) continue;
+    const checkins = (await c.env.DB.prepare('SELECT date, status, forgiven FROM checkins WHERE habit_id = ?').bind(ch.id).all()).results;
+    const stats = computeStats(checkins, 0, 0, 0);
+    const following = await c.env.DB.prepare('SELECT 1 FROM community_follows WHERE follower_id = ? AND following_id = ?').bind(u.id, cand.id).first();
+    buddies.push({
+      userId: cand.id,
+      username: cand.username,
+      habitName: ch.name,
+      startDate: ch.start_date,
+      daysDiff,
+      match,
+      streak: stats.currentStreak,
+      following: !!following,
+    });
+  }
+  const rank = { both: 0, habit: 1, start: 2 };
+  buddies.sort((a, b) => rank[a.match] - rank[b.match]);
+  return c.json({ optedIn, buddies });
 });
 
 // ---------- push ----------
@@ -502,12 +1081,22 @@ app.get('/api/push/vapid', async (c) => {
 app.post('/api/push/subscribe', async (c) => {
   const u = userOf(c);
   if (!u) return c.json({ error: 'Not authenticated' }, 401);
-  const { endpoint, keys } = await c.req.json().catch(() => ({}));
+  const { endpoint, keys, timezone } = await c.req.json().catch(() => ({}));
   if (!endpoint || !keys?.p256dh || !keys?.auth) return c.json({ error: 'endpoint and keys are required.' }, 400);
   await c.env.DB.prepare(
     `INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth, last_seen) VALUES (?, ?, ?, ?, datetime('now'))
      ON CONFLICT(endpoint) DO UPDATE SET user_id = excluded.user_id, p256dh = excluded.p256dh, auth = excluded.auth, last_seen = datetime('now')`
   ).bind(u.id, String(endpoint), String(keys.p256dh), String(keys.auth)).run();
+  if (timezone) await c.env.DB.prepare('UPDATE users SET timezone = ? WHERE id = ?').bind(String(timezone).slice(0, 64), u.id).run();
+  return c.json({ ok: true });
+});
+
+app.post('/api/push/tz', async (c) => {
+  const u = userOf(c);
+  if (!u) return c.json({ error: 'Not authenticated' }, 401);
+  const { timezone } = await c.req.json().catch(() => ({}));
+  if (!timezone) return c.json({ error: 'timezone is required.' }, 400);
+  await c.env.DB.prepare('UPDATE users SET timezone = ? WHERE id = ?').bind(String(timezone).slice(0, 64), u.id).run();
   return c.json({ ok: true });
 });
 
@@ -579,11 +1168,83 @@ app.get('/api/habits/:id/export', async (c) => {
   return c.text(rows.join('\r\n'), 200, { 'Content-Type': 'text/csv; charset=utf-8' });
 });
 
-// ---------- premium routes ----------
+// ---------- full account export (GDPR) ----------
+app.get('/api/me/export', async (c) => {
+  const u = userOf(c);
+  if (!u) return c.json({ error: 'Not authenticated' }, 401);
+  const user = await c.env.DB.prepare('SELECT id, email, role, username, timezone, buddy_opt_in FROM users WHERE id = ?').bind(u.id).first();
+  if (!user) return c.json({ error: 'User not found.' }, 404);
+  const subscription = (await c.env.DB.prepare('SELECT plan, status, started_at, renews_at FROM subscriptions WHERE user_id = ?').bind(u.id).first()) || null;
+  const habitsRows = (await c.env.DB.prepare('SELECT * FROM habits WHERE user_id = ? ORDER BY id').bind(u.id).all()).results;
+  const habits = [];
+  for (const h of habitsRows) {
+    const [checkins, urges, journals, dailyCheckins, badges] = await Promise.all([
+      c.env.DB.prepare('SELECT date, status, note, forgiven FROM checkins WHERE habit_id = ? ORDER BY date').bind(h.id).all(),
+      c.env.DB.prepare('SELECT logged_at, intensity, trigger, trigger_type, action, resisted FROM urges WHERE habit_id = ? ORDER BY logged_at').bind(h.id).all(),
+      c.env.DB.prepare('SELECT date, content FROM journals WHERE habit_id = ? ORDER BY date').bind(h.id).all(),
+      c.env.DB.prepare('SELECT date, energy, sleep, mood FROM daily_checkins WHERE habit_id = ? ORDER BY date').bind(h.id).all(),
+      c.env.DB.prepare('SELECT threshold, earned_date FROM badges WHERE habit_id = ? ORDER BY threshold').bind(h.id).all(),
+    ]);
+    habits.push({
+      name: h.name,
+      startDate: h.start_date,
+      dailyCost: h.daily_cost,
+      costUnit: h.cost_unit,
+      dailyTime: h.daily_time,
+      unitsPerDay: h.units_per_day,
+      triggerTimes: parseTriggerTimes(h.trigger_times),
+      reason: h.reason,
+      relapsePlan: h.relapse_plan,
+      checkins: checkins.results,
+      urges: urges.results,
+      journals: journals.results,
+      dailyCheckins: dailyCheckins.results,
+      badges: badges.results,
+    });
+  }
+  const [posts, comments, reactions, follows, pushSubs] = await Promise.all([
+    c.env.DB.prepare('SELECT id, content, habit_name, streak, badge, created_at FROM community_posts WHERE user_id = ? ORDER BY id').bind(u.id).all(),
+    c.env.DB.prepare('SELECT id, post_id, content, created_at FROM community_comments WHERE user_id = ? ORDER BY id').bind(u.id).all(),
+    c.env.DB.prepare('SELECT post_id, emoji, created_at FROM community_reactions WHERE user_id = ? ORDER BY post_id').bind(u.id).all(),
+    c.env.DB.prepare('SELECT following_id, created_at FROM community_follows WHERE follower_id = ? ORDER BY following_id').bind(u.id).all(),
+    c.env.DB.prepare('SELECT endpoint, last_seen FROM push_subscriptions WHERE user_id = ? ORDER BY id').bind(u.id).all(),
+  ]);
+  return c.json({
+    exportedAt: new Date().toISOString(),
+    profile: user,
+    subscription,
+    habits,
+    community: {
+      posts: posts.results,
+      comments: comments.results,
+      reactions: reactions.results,
+      follows: follows.results,
+    },
+    pushSubscriptions: pushSubs.results,
+  });
+});
+
+// ---------- account deletion (GDPR) ----------
+app.delete('/api/me', async (c) => {
+  const u = userOf(c);
+  if (!u) return c.json({ error: 'Not authenticated' }, 401);
+  const exists = await c.env.DB.prepare('SELECT id FROM users WHERE id = ?').bind(u.id).first();
+  if (!exists) return c.json({ error: 'User not found.' }, 404);
+  // journals_fts has no FK to cascade — remove those rows explicitly first.
+  const journalIds = (await c.env.DB.prepare(
+    'SELECT j.id FROM journals j JOIN habits h ON h.id = j.habit_id WHERE h.user_id = ?'
+  ).bind(u.id).all()).results;
+  for (const j of journalIds) {
+    await c.env.DB.prepare('DELETE FROM journals_fts WHERE rowid = ?').bind(j.id).run();
+  }
+  await c.env.DB.prepare('DELETE FROM users WHERE id = ?').bind(u.id).run();
+  return c.json({ ok: true });
+});
+
+// ---------- reports ----------
 app.post('/api/premium/report', async (c) => {
   const u = userOf(c);
   if (!u) return c.json({ error: 'Not authenticated' }, 401);
-  if (!(await isPremium(c.env, u.id))) return c.json({ error: 'This is a Premium feature.', code: 'PREMIUM_REQUIRED' }, 402);
   const { habitId, month } = await c.req.json().catch(() => ({}));
   const habit = await habitOf(c.env, habitId, u.id);
   if (!habit) return c.json({ error: 'Habit not found.' }, 404);
@@ -594,7 +1255,6 @@ app.post('/api/premium/report', async (c) => {
 app.post('/api/premium/recovery-plan', async (c) => {
   const u = userOf(c);
   if (!u) return c.json({ error: 'Not authenticated' }, 401);
-  if (!(await isPremium(c.env, u.id))) return c.json({ error: 'This is a Premium feature.', code: 'PREMIUM_REQUIRED' }, 402);
   const { habitId } = await c.req.json().catch(() => ({}));
   const habit = await habitOf(c.env, habitId, u.id);
   if (!habit) return c.json({ error: 'Habit not found.' }, 404);
@@ -619,11 +1279,34 @@ app.get('/api/admin/status', async (c) => {
   const counts = await countsFor(c.env);
   const premium = await c.env.DB.prepare("SELECT COUNT(*) AS n FROM subscriptions WHERE plan = 'premium' AND status = 'active'").first();
   const errors24h = await c.env.DB.prepare("SELECT COUNT(*) AS n FROM app_errors WHERE created_at > datetime('now', '-24 hours')").first();
+  const metaRows = {};
+  for (const r of (await c.env.DB.prepare("SELECT key, value FROM meta WHERE key IN ('nudges_last_run','nudges_last_sent','nudges_sent')").all()).results) {
+    metaRows[r.key] = r.value;
+  }
+  const nowMs = Date.now();
+  const age = (iso) => {
+    const ms = iso ? Date.parse(iso) : 0;
+    return Number.isFinite(ms) && ms > 0 ? Math.round((nowMs - ms) / 3600000) : null;
+  };
+  const subsCount = Number((await c.env.DB.prepare('SELECT COUNT(*) AS n FROM push_subscriptions').first())?.n || 0);
+  const uptime = Math.round((Date.now() - c.env.STARTED_AT) / 1000) || 0;
+  const runAge = age(metaRows.nudges_last_run);
+  const notifications = {
+    lastRun: metaRows.nudges_last_run || null,
+    lastSent: metaRows.nudges_last_sent || null,
+    sentTotal: Number(metaRows.nudges_sent || 0),
+    subs: subsCount,
+    runAgeH: runAge,
+    sentAgeH: age(metaRows.nudges_last_sent),
+    healthy: runAge != null && runAge <= 27,
+  };
   return c.json({
-    uptime: Math.round((Date.now() - c.env.STARTED_AT) / 1000) || 0,
+    uptime,
+    startedAt: new Date(Date.now() - uptime * 1000).toISOString(),
     counts,
     premiumUsers: Number(premium?.n || 0),
     errors24h: Number(errors24h?.n || 0),
+    notifications,
   });
 });
 
@@ -659,8 +1342,32 @@ app.post('/api/admin/ai-check', async (c) => {
   const s = computeStats(sample, 10, 1);
   const streakOk = s.currentStreak === 2 && s.longestStreak === 2 && s.totalSlips === 1 && s.totalClean === 4;
   checks.push({ name: 'Streak engine', ok: streakOk, detail: streakOk ? 'Correct: streak 2, longest 2' : `Mismatch: streak ${s.currentStreak}` });
+  const aiCheck = await checkOpenAI(c.env);
+  checks.push({ name: 'AI model (OpenAI)', ok: aiCheck.ok, detail: aiCheck.detail });
   const healthy = checks.every((x) => x.ok);
   return c.json({ healthy, checks, summary: healthy ? 'All checks passed.' : 'Some checks failed.', suggestions: [] });
+});
+
+app.post('/api/admin/grant-premium', async (c) => {
+  const u = userOf(c);
+  if (!u) return c.json({ error: 'Not authenticated' }, 401);
+  if (u.role !== 'admin') return c.json({ error: 'Admin access required.' }, 403);
+  const { userId, days = 30 } = await c.req.json().catch(() => ({}));
+  const targetId = Number(userId);
+  if (!targetId) return c.json({ error: 'userId is required.' }, 400);
+  const target = await c.env.DB.prepare('SELECT id, email FROM users WHERE id = ?').bind(targetId).first();
+  if (!target) return c.json({ error: 'User not found.' }, 404);
+  await c.env.DB.prepare(
+    `INSERT INTO subscriptions (user_id, plan, status, started_at, renews_at)
+     VALUES (?, 'premium', 'active', datetime('now'), datetime('now', ?))
+     ON CONFLICT(user_id) DO UPDATE SET
+       plan = 'premium',
+       status = 'active',
+       started_at = datetime('now'),
+       renews_at = datetime('now', ?)`
+  ).bind(targetId, `+${days} days`, `+${days} days`).run();
+  const sub = await c.env.DB.prepare('SELECT plan, status, renews_at FROM subscriptions WHERE user_id = ?').bind(targetId).first();
+  return c.json({ ok: true, user: { id: target.id, email: target.email }, subscription: sub });
 });
 
 // ---------- AI (registered separately, shares env) ----------
@@ -690,6 +1397,185 @@ async function ensureAdmin(env) {
   await env.DB.prepare('INSERT INTO users (email, password_hash, role) VALUES (?, ?, ?)').bind(em, hash, 'admin').run();
 }
 
+// ---------- scheduled nudges (proactive push) ----------
+// Trigger-window buckets: hour is the LOCAL hour a nudge should fire for that window.
+const TRIGGER_BUCKETS = [
+  { name: 'Morning', hour: 9 },
+  { name: 'Midday', hour: 12 },
+  { name: 'Afternoon', hour: 15 },
+  { name: 'Evening', hour: 19 },
+  { name: 'Late night', hour: 22 },
+];
+
+// Resolve the user's current local hour from either an IANA zone name (set by the
+// client or IP inference) or a fixed "UTC±H" offset (backfilled best-guess).
+function localHour(tz) {
+  try {
+    if (tz) {
+      const m = /^UTC([+-])(\d{1,2})(?::?(\d{2}))?$/.exec(tz);
+      if (m) {
+        const offset = (m[1] === '-' ? -1 : 1) * (Number(m[2]) + (Number(m[3] || 0) / 60));
+        return (new Date().getUTCHours() + offset + 48) % 24;
+      }
+    }
+    if (tz) {
+      const s = new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: '2-digit', hour12: false }).format(new Date());
+      const n = parseInt(s, 10);
+      if (Number.isFinite(n)) return n === 24 ? 0 : n;
+    }
+  } catch {
+    /* fall through */
+  }
+  return new Date().getUTCHours();
+}
+
+async function sendScheduledNudges(env) {
+  const users = (
+    await env.DB.prepare(
+      'SELECT DISTINCT p.user_id AS user_id, u.notification_prefs, u.timezone FROM push_subscriptions p JOIN users u ON u.id = p.user_id'
+    ).all()
+  ).results;
+  const utcHour = new Date().getUTCHours();
+  const nowBucket = TRIGGER_BUCKETS.find((b) => b.hour === utcHour);
+  let sent = 0;
+  for (const user of users) {
+    try {
+      const prefs = { ...DEFAULT_PREFS };
+      if (user.notification_prefs) Object.assign(prefs, JSON.parse(user.notification_prefs));
+      const habits = (
+        await env.DB.prepare('SELECT id, name, units_per_day, trigger_times FROM habits WHERE user_id = ?').bind(user.user_id).all()
+      ).results;
+      if (!habits.length) continue;
+      const subs = (
+        await env.DB.prepare('SELECT endpoint, p256dh, auth FROM push_subscriptions WHERE user_id = ?').bind(user.user_id).all()
+      ).results;
+
+      const sendAll = async (payload) => {
+        let ok = 0;
+        const stale = [];
+        for (const s of subs) {
+          try {
+            await sendPush(env, s, payload);
+            ok += 1;
+          } catch (e) {
+            if (e && (e.statusCode === 404 || e.statusCode === 410)) stale.push(s.endpoint);
+          }
+        }
+        for (const endpoint of stale) {
+          await env.DB.prepare('DELETE FROM push_subscriptions WHERE endpoint = ?').bind(endpoint).run();
+        }
+        return ok;
+      };
+
+      const lh = localHour(user.timezone);
+      const today = todayKey();
+
+      // Daily reminder in the user's morning window. A preferred reminderTime
+      // (HH:MM, set in onboarding/settings) pins it to a specific local hour;
+      // otherwise it fires anytime in the 7–10 local morning window.
+      const rtHour = prefs.reminderTime ? Number(String(prefs.reminderTime).slice(0, 2)) : null;
+      const reminderDue = rtHour != null && Number.isFinite(rtHour)
+        ? lh === rtHour
+        : lh >= 7 && lh <= 10;
+      if (prefs.dailyReminder !== false && reminderDue) {
+        const last = await env.DB.prepare('SELECT value FROM meta WHERE key = ?').bind(`daily_push_${user.user_id}`).first();
+        if (String(last?.value || '') !== today) {
+          const best = habits[0];
+          const stats = computeStats(
+            (await env.DB.prepare('SELECT date, status, forgiven FROM checkins WHERE habit_id = ?').bind(best.id).all()).results,
+            0,
+            0,
+            Number(best.units_per_day) || 0
+          );
+          const body =
+            stats.currentStreak > 0
+              ? `Day ${stats.currentStreak} on "${best.name}". One day at a time — you've got this. 💪`
+              : 'Start the day with your "why". Reaffirm it now and stay one step ahead of the urges.';
+          const ok = await sendAll({ title: 'BreakFree', body, habitId: best.id, url: '/app?action=checkin' });
+          if (ok > 0) {
+            await env.DB.prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
+              .bind(`daily_push_${user.user_id}`, today)
+              .run();
+            sent += 1;
+          }
+        }
+      }
+
+      // Trigger-window nudge: fires during a bucket hour that matches the habit's trigger_times.
+      if (prefs.triggerNudges !== false && nowBucket) {
+        for (const habit of habits) {
+          const times = parseTriggerTimes(habit.trigger_times);
+          if (!times.includes(nowBucket.name)) continue;
+          // Don't nag people who already engaged with this habit today.
+          const checkinToday = await env.DB.prepare('SELECT id FROM checkins WHERE habit_id = ? AND date = ?').bind(habit.id, today).first();
+          if (checkinToday) continue;
+          const urgeToday = await env.DB.prepare('SELECT id FROM urges WHERE habit_id = ? AND logged_at LIKE ?').bind(habit.id, `${today}%`).first();
+          if (urgeToday) continue;
+          const dedupe = await env.DB.prepare('SELECT value FROM meta WHERE key = ?').bind(`trigger_push_${user.user_id}_${nowBucket.name}_${today}`).first();
+          if (dedupe) continue;
+          const stats = computeStats(
+            (await env.DB.prepare('SELECT date, status, forgiven FROM checkins WHERE habit_id = ?').bind(habit.id).all()).results,
+            0,
+            0,
+            Number(habit.units_per_day) || 0
+          );
+          const streakBit = stats.currentStreak > 0 ? ` You're ${stats.currentStreak} days in.` : '';
+          const body = `It's your usual trigger window (${nowBucket.name}) for "${habit.name}".${streakBit} Log how you're feeling, then ride it out. 💪`;
+          const ok = await sendAll({ title: 'Time to check in', body, habitId: habit.id, url: '/app?action=checkin' });
+          if (ok > 0) {
+            await env.DB.prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
+              .bind(`trigger_push_${user.user_id}_${nowBucket.name}_${today}`, '1')
+              .run();
+            sent += 1;
+          }
+        }
+      }
+
+      if (prefs.milestones !== false) {
+        for (const habit of habits) {
+          const stats = computeStats(
+            (await env.DB.prepare('SELECT date, status, forgiven FROM checkins WHERE habit_id = ?').bind(habit.id).all()).results,
+            0,
+            0,
+            Number(habit.units_per_day) || 0
+          );
+          if (!BADGE_THRESHOLDS.includes(stats.currentStreak)) continue;
+          const badge = await env.DB.prepare('SELECT id FROM badges WHERE habit_id = ? AND threshold = ?').bind(habit.id, stats.currentStreak).first();
+          if (badge) continue;
+          const ok = await sendAll({
+            title: 'Milestone reached',
+            body: `${stats.currentStreak} days clean on "${habit.name}" — look how far you've come. 🎉`,
+            habitId: habit.id,
+          });
+          if (ok > 0) {
+            await env.DB.prepare('INSERT INTO badges (habit_id, threshold, earned_date) VALUES (?, ?, ?) ON CONFLICT(habit_id, threshold) DO NOTHING')
+              .bind(habit.id, stats.currentStreak, todayKey())
+              .run();
+            sent += 1;
+          }
+        }
+      }
+    } catch (e) {
+      console.error('scheduled nudge failed for user', user.user_id, e.message);
+    }
+  }
+  // Health tracking: lets the admin dashboard tell a working cron from a dead one.
+  try {
+    const nowStr = new Date().toISOString();
+    if (sent > 0) {
+      await env.DB.prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + CAST(excluded.value AS INTEGER)')
+        .bind('nudges_sent', String(sent)).run();
+      await env.DB.prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
+        .bind('nudges_last_sent', nowStr).run();
+    }
+    await env.DB.prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
+      .bind('nudges_last_run', nowStr).run();
+  } catch (e) {
+    console.error('nudge health tracking failed:', e.message);
+  }
+  return sent;
+}
+
 // Entry handler: ensures the admin account exists, then runs the app.
 export default {
   async fetch(request, env, ctx) {
@@ -703,5 +1589,15 @@ export default {
       }
     }
     return app.fetch(request, env, ctx);
+  },
+  // Proactive push: daily reminder + missed milestone nudge, gated on prefs.
+  async scheduled(event, env, ctx) {
+    try {
+      const sent = await sendScheduledNudges(env);
+      const eng = await evaluateAllEngagement(env);
+      console.log(`scheduled nudges: ${sent} sent; engagement: ${eng.cascade} cascade, ${eng.digest} digest`);
+    } catch (e) {
+      console.error('scheduled nudges failed:', e.message);
+    }
   },
 };

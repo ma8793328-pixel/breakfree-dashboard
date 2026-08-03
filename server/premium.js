@@ -39,7 +39,7 @@ function hourBucket(iso) {
 export function buildReport(habit, month) {
   const prefix = `${month}-`;
   const checkins = db
-    .prepare('SELECT date, status FROM checkins WHERE habit_id = ? AND date LIKE ? ORDER BY date')
+    .prepare('SELECT date, status, forgiven FROM checkins WHERE habit_id = ? AND date LIKE ? ORDER BY date')
     .all(habit.id, `${prefix}%`);
   const urges = db
     .prepare('SELECT intensity, trigger, resisted, logged_at FROM urges WHERE habit_id = ? AND logged_at LIKE ?')
@@ -102,7 +102,7 @@ export function buildReport(habit, month) {
   if (longestRun >= 5) {
     summaryParts.push(`Your best run was ${longestRun} clean ${longestRun === 1 ? 'day' : 'days'} in a row — proof of what's possible.`);
   }
-  if (moneySaved > 0) summaryParts.push(`That saved you about $${moneySaved.toLocaleString()} in habit costs.`);
+  if (moneySaved > 0) summaryParts.push(`That saved you about £${moneySaved.toLocaleString()} in habit costs.`);
   if (timeSaved > 0) summaryParts.push(`And won back roughly ${timeSaved} hours.`);
   if (urges.length) {
     summaryParts.push(`You logged ${urges.length} urges and resisted ${resistedPct}% of them.`);
@@ -158,7 +158,7 @@ export function buildReport(habit, month) {
 }
 
 export function buildRecoveryPlan(habit) {
-  const checkins = db.prepare('SELECT date, status FROM checkins WHERE habit_id = ? ORDER BY date DESC LIMIT 14').all(habit.id);
+  const checkins = db.prepare('SELECT date, status, forgiven FROM checkins WHERE habit_id = ? ORDER BY date DESC LIMIT 14').all(habit.id);
   const recentSlip = checkins.find((c) => c.status === 'slip')?.date || null;
   const urges = db
     .prepare('SELECT trigger, resisted FROM urges WHERE habit_id = ? ORDER BY logged_at DESC LIMIT 20')
@@ -199,8 +199,8 @@ export function buildRecoveryPlan(habit) {
   };
 }
 
-export function registerPremiumRoutes(app, { requireAuth, requirePremium, habitForUser }) {
-  app.post('/api/premium/report', requireAuth, requirePremium, (req, res) => {
+export function registerPremiumRoutes(app, { requireAuth, habitForUser }) {
+  app.post('/api/premium/report', requireAuth, (req, res) => {
     const { habitId, month } = req.body || {};
     const habit = habitForUser(Number(habitId), req.user.id);
     if (!habit) return res.status(404).json({ error: 'Habit not found.' });
@@ -208,7 +208,7 @@ export function registerPremiumRoutes(app, { requireAuth, requirePremium, habitF
     res.json({ report: buildReport(habit, m) });
   });
 
-  app.post('/api/premium/recovery-plan', requireAuth, requirePremium, (req, res) => {
+  app.post('/api/premium/recovery-plan', requireAuth, (req, res) => {
     const { habitId } = req.body || {};
     const habit = habitForUser(Number(habitId), req.user.id);
     if (!habit) return res.status(404).json({ error: 'Habit not found.' });

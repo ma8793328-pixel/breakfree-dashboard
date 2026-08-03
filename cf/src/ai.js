@@ -4,11 +4,12 @@
 
 import { coachReply, reflectOnJournal, urgeInsight } from './aiCoach.js';
 import { computeStats, todayKey } from './stats.js';
+import { chat, streamChat, buildMessages } from './openai.js';
 
 export async function buildCoachCtx(env, habit) {
-  const checkins = (await env.DB.prepare('SELECT date, status FROM checkins WHERE habit_id = ?').bind(habit.id).all())
+  const checkins = (await env.DB.prepare('SELECT date, status, forgiven FROM checkins WHERE habit_id = ?').bind(habit.id).all())
     .results;
-  const stats = computeStats(checkins, habit.daily_cost, habit.daily_time);
+  const stats = computeStats(checkins, habit.daily_cost, habit.daily_time, habit.units_per_day);
   const badges = (await env.DB.prepare('SELECT threshold, earned_date FROM badges WHERE habit_id = ? ORDER BY threshold').bind(habit.id).all())
     .results;
   const urges = (await env.DB.prepare('SELECT intensity, trigger, resisted, logged_at FROM urges WHERE habit_id = ? ORDER BY logged_at').bind(habit.id).all())
@@ -33,11 +34,6 @@ export async function buildCoachCtx(env, habit) {
     dailyCheckin,
     dailyCheckins: dailyRows,
   };
-}
-
-async function isPremium(env, userId) {
-  const row = await env.DB.prepare('SELECT plan FROM subscriptions WHERE user_id = ?').bind(userId).first();
-  return !!row && row.plan !== 'free';
 }
 
 function sseStream(words, quickReplies) {
@@ -66,35 +62,72 @@ function sseStream(words, quickReplies) {
 }
 
 export function registerAiRoutes(app, { env, userOf }) {
-  const needPremium = async (c, next) => {
+  app.post('/api/ai/chat', async (c) => {
     const u = userOf(c);
     if (!u) return c.json({ error: 'Not authenticated' }, 401);
-    if (!(await isPremium(env(c), u.id))) {
-      return c.json({ error: 'This is a Premium feature.', code: 'PREMIUM_REQUIRED' }, 402);
-    }
-    await next();
-  };
-
-  app.post('/api/ai/chat', needPremium, async (c) => {
-    const u = userOf(c);
     const body = await c.req.json().catch(() => ({}));
     const habit = await env(c).DB.prepare('SELECT * FROM habits WHERE id = ? AND user_id = ?').bind(Number(body.habitId), u.id).first();
     if (!habit) return c.json({ error: 'Habit not found.' }, 404);
     if (!body.message || !String(body.message).trim()) return c.json({ error: 'Message cannot be empty.' }, 400);
     const ctx = { ...(await buildCoachCtx(env(c), habit)), seed: Number(body.seed || 0) };
-    return c.json(coachReply(String(body.message), ctx));
+    try {
+      const text = await chat(env(c), buildMessages(body.message, ctx));
+      return c.json({ text, quickReplies: [] });
+    } catch (e) {
+      return c.json(coachReply(String(body.message), ctx));
+    }
   });
 
-  app.post('/api/ai/chat/stream', needPremium, async (c) => {
+  app.post('/api/ai/chat/stream', async (c) => {
     const u = userOf(c);
+    if (!u) return c.json({ error: 'Not authenticated' }, 401);
     const body = await c.req.json().catch(() => ({}));
     const habit = await env(c).DB.prepare('SELECT * FROM habits WHERE id = ? AND user_id = ?').bind(Number(body.habitId), u.id).first();
     if (!habit) return c.json({ error: 'Habit not found.' }, 404);
     if (!body.message || !String(body.message).trim()) return c.json({ error: 'Message cannot be empty.' }, 400);
     const ctx = { ...(await buildCoachCtx(env(c), habit)), seed: Number(body.seed || 0) };
-    const reply = coachReply(String(body.message), ctx);
-    const words = reply.text.split(/(\s+)/);
-    return new Response(sseStream(words, reply.quickReplies || []), {
+    const messages = buildMessages(body.message, ctx);
+
+    let closed = false;
+    let timer = null;
+    const stream = new ReadableStream({
+      start(controller) {
+        const encoder = new TextEncoder();
+        const send = (payload) => {
+          if (closed) return;
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`));
+        };
+        (async () => {
+          try {
+            await streamChat(env(c), messages, (delta) => send({ delta }), () => {
+              send({ done: true, quickReplies: [] });
+              controller.close();
+            });
+          } catch (e) {
+            const reply = coachReply(String(body.message), ctx);
+            const words = reply.text.split(/(\s+)/);
+            let i = 0;
+            timer = setInterval(() => {
+              if (closed || i >= words.length) {
+                clearInterval(timer);
+                if (!closed && i >= words.length) {
+                  send({ done: true, quickReplies: reply.quickReplies || [] });
+                  controller.close();
+                }
+                return;
+              }
+              send({ delta: words[i++] });
+            }, 32);
+          }
+        })();
+      },
+      cancel() {
+        closed = true;
+        if (timer) clearInterval(timer);
+      },
+    });
+
+    return new Response(stream, {
       headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no' },
     });
   });
@@ -110,16 +143,19 @@ export function registerAiRoutes(app, { env, userOf }) {
     return c.json({ text });
   });
 
-  app.post('/api/ai/urge-insights', needPremium, async (c) => {
+  app.post('/api/ai/urge-insights', async (c) => {
     const u = userOf(c);
-    const habit = await env(c).DB.prepare('SELECT * FROM habits WHERE id = ? AND user_id = ?').bind(Number((await c.req.json().catch(() => ({}))).habitId), u.id).first();
+    if (!u) return c.json({ error: 'Not authenticated' }, 401);
+    const body = await c.req.json().catch(() => ({}));
+    const habit = await env(c).DB.prepare('SELECT * FROM habits WHERE id = ? AND user_id = ?').bind(Number(body.habitId), u.id).first();
     if (!habit) return c.json({ error: 'Habit not found.' }, 404);
     const ctx = await buildCoachCtx(env(c), habit);
     return c.json({ insight: urgeInsight(ctx.urges, ctx) });
   });
 
-  app.post('/api/ai/journal-search', needPremium, async (c) => {
+  app.post('/api/ai/journal-search', async (c) => {
     const u = userOf(c);
+    if (!u) return c.json({ error: 'Not authenticated' }, 401);
     const body = await c.req.json().catch(() => ({}));
     const habit = await env(c).DB.prepare('SELECT * FROM habits WHERE id = ? AND user_id = ?').bind(Number(body.habitId), u.id).first();
     if (!habit) return c.json({ error: 'Habit not found.' }, 404);
@@ -133,5 +169,19 @@ export function registerAiRoutes(app, { env, userOf }) {
        ORDER BY rank LIMIT 20`
     ).bind(tokens).all();
     return c.json({ results: rows.results });
+  });
+
+  app.post('/api/ai/save-journal', async (c) => {
+    const u = userOf(c);
+    if (!u) return c.json({ error: 'Not authenticated' }, 401);
+    const body = await c.req.json().catch(() => ({}));
+    const habit = await env(c).DB.prepare('SELECT * FROM habits WHERE id = ? AND user_id = ?').bind(Number(body.habitId), u.id).first();
+    if (!habit) return c.json({ error: 'Habit not found.' }, 404);
+    const content = String(body.content || '').trim();
+    if (!content) return c.json({ error: 'Content cannot be empty.' }, 400);
+    const now = new Date().toISOString().slice(0, 10);
+    const info = await env(c).DB.prepare('INSERT INTO journals (habit_id, date, content) VALUES (?, ?, ?)').bind(habit.id, now, content).run();
+    const row = await env(c).DB.prepare('SELECT id, date, content FROM journals WHERE id = ?').bind(info.meta.last_row_id).first();
+    return c.json({ journal: row });
   });
 }

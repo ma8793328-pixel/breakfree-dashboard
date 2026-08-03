@@ -53,6 +53,15 @@ function Icon({ name }) {
           <path d="M19 16l.7 2.1L22 19l-2.3.9L19 22l-.7-2.1L16 19l2.3-.9z" />
         </svg>
       );
+    case 'community':
+      return (
+        <svg {...common}>
+          <circle cx="9" cy="8" r="3.5" />
+          <path d="M3 20v-1.5a6 6 0 0 1 12 0V20" />
+          <path d="M15 4.5a3.5 3.5 0 0 1 0 7" />
+          <path d="M17 13.5a5.5 5.5 0 0 1 4 5V20" />
+        </svg>
+      );
     default:
       return null;
   }
@@ -65,6 +74,7 @@ const TABS = [
   { to: '/app/journal', label: 'Journal', icon: 'journal', end: false },
   { to: '/app/stats', label: 'Stats', icon: 'stats', end: false },
   { to: '/app/habits', label: 'Habits', icon: 'habits', end: false },
+  { to: '/app/community', label: 'Community', icon: 'community', end: false },
 ];
 
 export default function BottomNav() {

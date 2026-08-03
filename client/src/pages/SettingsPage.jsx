@@ -1,13 +1,18 @@
 import { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import Layout from '../components/Layout.jsx';
 import { useAuth } from '../auth.jsx';
-import { api } from '../api.js';
 import { usePushNotifications } from '../usePushNotifications.js';
+import { api, exportAccountData, deleteAccount } from '../api.js';
 
 const PREFS = [
-  { key: 'dailyReminder', title: 'Daily check-in reminders', desc: 'A gentle nudge when your sleep score comes in low.' },
+  { key: 'triggerNudges', title: 'Trigger-time nudges', desc: 'A nudge at your usual trigger times to log how you\'re feeling.' },
+  { key: 'dailyReminder', title: 'Daily check-in reminders', desc: 'A gentle morning nudge while your streak is alive.' },
   { key: 'urgeTips', title: 'Urge & craving tips', desc: 'A quick coping tip after you log an urge.' },
   { key: 'milestones', title: 'Milestone celebrations', desc: 'A cheer when you earn a new streak badge.' },
+  { key: 'digestOptIn', title: 'Weekly email digest', desc: 'A Sunday summary of your clean days, urges and savings — by email.' },
+  { key: 'reEngageOptIn', title: 'Re-engagement nudges', desc: 'If you go quiet for a day or two, gentle check-in pushes to bring you back.' },
+  { key: 'emailOptIn', title: 'Email re-engagement', desc: 'A one-off email if you stay away for 3+ days — so the streak can still come back.' },
 ];
 
 function Toggle({ checked, onChange, label }) {
@@ -26,12 +31,16 @@ function Toggle({ checked, onChange, label }) {
 }
 
 export default function SettingsPage() {
-  const { token } = useAuth();
+  const { token, user, logout } = useAuth();
   const { supported: pushSupported, status: pushStatus, subscribe: enablePush, error: pushError } =
     usePushNotifications(token);
   const [prefs, setPrefs] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
+  const [exportBusy, setExportBusy] = useState(false);
+  const [exportMsg, setExportMsg] = useState(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleteBusy, setDeleteBusy] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -66,6 +75,60 @@ export default function SettingsPage() {
     }
   }
 
+  async function setReminderTime(value) {
+    setPrefs((p) => ({ ...p, reminderTime: value || null }));
+    setBusy(true);
+    setError(null);
+    try {
+      const data = await api('/settings/notifications', {
+        method: 'PUT',
+        token,
+        body: { reminderTime: value || null },
+      });
+      setPrefs(data.prefs);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleExport() {
+    setExportBusy(true);
+    setExportMsg(null);
+    setError(null);
+    try {
+      const data = await exportAccountData(token);
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `breakfree_account_${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+      setExportMsg('Your export is ready — it includes all habits, check-ins, urges and journals.');
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setExportBusy(false);
+    }
+  }
+
+  async function handleDelete() {
+    setDeleteBusy(true);
+    setError(null);
+    try {
+      await deleteAccount(token);
+      logout();
+      window.location.href = '/';
+    } catch (e) {
+      setError(e.message);
+      setDeleteBusy(false);
+    }
+  }
+
   const statusText =
     !pushSupported
       ? 'This browser doesn\'t support push notifications.'
@@ -86,6 +149,11 @@ export default function SettingsPage() {
 
       <div className="card">
         <p className="card-title">Alerts</p>
+        {prefs && (
+          <p className="muted small" style={{ marginBottom: 8 }}>
+            Email options send to <strong style={{ color: 'var(--cream)' }}>{user?.email}</strong>; push options stay on this device.
+          </p>
+        )}
         {prefs ? (
           <div className="settings-list">
             {PREFS.map((p) => (
@@ -104,6 +172,21 @@ export default function SettingsPage() {
           </div>
         ) : (
           <p className="muted small">Loading preferences...</p>
+        )}
+        {prefs && (
+          <div className="settings-row" style={{ borderTop: '1px solid var(--border)', marginTop: 6, paddingTop: 12 }}>
+            <div style={{ flex: 1 }}>
+              <p className="settings-title">Daily reminder time</p>
+              <p className="muted small">Pick an exact time — otherwise it fires sometime in the morning (7–10am).</p>
+            </div>
+            <input
+              type="time"
+              aria-label="Daily reminder time"
+              value={prefs.reminderTime || ''}
+              onChange={(e) => setReminderTime(e.target.value)}
+              disabled={busy}
+            />
+          </div>
         )}
         {busy && <p className="muted small" style={{ marginTop: 10 }}>Saving…</p>}
       </div>
@@ -125,6 +208,47 @@ export default function SettingsPage() {
           servers outside your machine.
         </p>
       </div>
+
+      <div className="card">
+        <p className="card-title">🛡️ Your data</p>
+        <p className="muted small" style={{ marginBottom: 12 }}>
+          You own your data. Export everything at any time — or delete your account and all of it permanently.
+        </p>
+        <button className="btn btn-ghost" onClick={handleExport} disabled={exportBusy}>
+          {exportBusy ? 'Preparing...' : '📥 Export all my data'}
+        </button>
+        {exportMsg && <p className="muted small" style={{ marginTop: 8 }}>{exportMsg}</p>}
+        <div className="divider" style={{ margin: '14px 0' }} />
+        {!confirmDelete ? (
+          <button className="btn btn-danger-ghost" onClick={() => setConfirmDelete(true)} disabled={deleteBusy}>
+            🗑️ Delete my account
+          </button>
+        ) : (
+          <div>
+            <p className="muted small" style={{ marginBottom: 8 }}>
+              This permanently erases your account, habits, check-ins, urges, journals and community activity. This can't be undone.
+            </p>
+            <div className="row">
+              <button className="btn btn-ghost" style={{ flex: 1 }} onClick={() => setConfirmDelete(false)} disabled={deleteBusy}>
+                Cancel
+              </button>
+              <button className="btn btn-danger" style={{ flex: 1 }} onClick={handleDelete} disabled={deleteBusy}>
+                {deleteBusy ? 'Deleting...' : 'Yes, delete everything'}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <Link to="/app/help" className="card help-link">
+        <div>
+          <p className="settings-title">🫂 Get help</p>
+          <p className="muted small" style={{ marginTop: 2 }}>
+            Drug & alcohol support, crisis helplines and habit-change resources.
+          </p>
+        </div>
+        <span className="help-arrow">→</span>
+      </Link>
     </Layout>
   );
 }

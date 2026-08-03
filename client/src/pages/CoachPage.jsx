@@ -4,8 +4,35 @@ import Layout from '../components/Layout.jsx';
 import { useAuth } from '../auth.jsx';
 import { useHabits } from '../habits.jsx';
 import { useHabitDetail } from '../useHabitDetail.js';
-import { useSubscription } from '../subscription.jsx';
 import { coachReply, checkinNote } from '../aiCoach.js';
+import { saveCoachJournal } from '../api.js';
+import { getMessages, setMessages as saveMessages, clearAll } from '../chatStore.js';
+import SpeakButton from '../components/SpeakButton.jsx';
+
+const MAX_CACHE = 5;
+
+function coachCacheKey(habitId) {
+  return `bf_coach_cache_${habitId}`;
+}
+
+function readCoachCache(habitId) {
+  try {
+    const raw = localStorage.getItem(coachCacheKey(habitId));
+    const list = raw ? JSON.parse(raw) : [];
+    return Array.isArray(list) ? list.slice(-MAX_CACHE) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeCoachCache(habitId, messages) {
+  try {
+    const trimmed = messages.slice(-MAX_CACHE);
+    localStorage.setItem(coachCacheKey(habitId), JSON.stringify(trimmed));
+  } catch {
+    // storage full or blocked — silently ignore
+  }
+}
 
 const OPENERS = [
   "I'm having an urge right now",
@@ -41,7 +68,6 @@ export default function CoachPage() {
   const { token } = useAuth();
   const { active, loading } = useHabits();
   const { detail } = useHabitDetail(active?.id, token);
-  const { premium } = useSubscription();
   const navigate = useNavigate();
 
   const [messages, setMessages] = useState([]);
@@ -51,18 +77,55 @@ export default function CoachPage() {
   const [quick, setQuick] = useState(OPENERS);
   const [showStrategies, setShowStrategies] = useState(false);
   const [mode, setMode] = useState(null);
+  const [offline, setOffline] = useState(false);
+  const [savedIds, setSavedIds] = useState(new Set());
+  const [showScrollBtn, setShowScrollBtn] = useState(false);
   const scrollRef = useRef(null);
   const msgCount = useRef(0);
+  const isAtBottom = useRef(true);
 
   const ctx = useMemo(() => buildCtx(active, detail), [active, detail]);
 
   useEffect(() => {
-    if (premium) setMode('premium');
-    else if (!loading) setMode('locked');
-  }, [premium, loading]);
+    if (!loading && active) setMode('open');
+  }, [loading, active]);
 
   useEffect(() => {
-    if (messages.length === 0 && active && mode === 'premium') {
+    if (!active) {
+      setMessages([]);
+      return;
+    }
+    const stored = getMessages(active.id);
+    if (stored.length > 0) setMessages(stored);
+  }, [active?.id]);
+
+  useEffect(() => {
+    if (!active) return;
+    saveMessages(active.id, messages);
+  }, [active?.id, messages]);
+
+  useEffect(() => {
+    if (!token) clearAll();
+  }, [token]);
+
+  useEffect(() => {
+    function restore() {
+      if (!active) return;
+      const cached = readCoachCache(active.id);
+      if (cached.length > 0) setMessages(cached);
+    }
+    restore();
+    window.addEventListener('online', restore);
+    return () => window.removeEventListener('online', restore);
+  }, [active?.id]);
+
+  useEffect(() => {
+    if (!active) return;
+    writeCoachCache(active.id, messages);
+  }, [active?.id, messages]);
+
+  useEffect(() => {
+    if (messages.length === 0 && active && mode === 'open') {
       const firstName = 'friend';
       const streakLine =
         ctx.streak > 0
@@ -75,7 +138,7 @@ export default function CoachPage() {
         {
           id: 1,
           role: 'coach',
-          text: `Hi ${firstName} 👋 I'm your coach, and I know your journey — your streaks, your urges, your journal. ${streakLine}${checkinLine ? ` ${checkinLine}` : ''} Whatever comes up — a craving, a win, a rough day — talk to me.`,
+          text: `hey — I'm your coach, I know your journey. ${streakLine}${checkinLine ? ` ${checkinLine}` : ''} whatever comes up, I'm here.`,
         },
       ]);
     }
@@ -83,8 +146,24 @@ export default function CoachPage() {
   }, [active, mode]);
 
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
+    const el = scrollRef.current;
+    if (!el) return;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    isAtBottom.current = atBottom;
+    setShowScrollBtn(!atBottom);
+  }, [messages, streamText, typing]);
+
+  useEffect(() => {
+    if (isAtBottom.current) {
+      scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
+    }
   }, [messages, typing]);
+
+  function scrollToBottom() {
+    isAtBottom.current = true;
+    setShowScrollBtn(false);
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
+  }
 
   async function streamReply(habitId, message) {
     const res = await fetch('/api/ai/chat/stream', {
@@ -131,6 +210,7 @@ export default function CoachPage() {
     if (!acc) throw new Error('The coach went quiet.');
     setMessages((prev) => [...prev, { id: Date.now() + 1, role: 'coach', text: acc }]);
     setStreamText(null);
+    setOffline(false);
     return quickReplies;
   }
 
@@ -138,7 +218,8 @@ export default function CoachPage() {
     const msg = (text || input).trim();
     if (!msg || typing) return;
     msgCount.current += 1;
-    setMessages((prev) => [...prev, { id: Date.now(), role: 'user', text: msg }]);
+    const userMsgId = Date.now();
+    setMessages((prev) => [...prev, { id: userMsgId, role: 'user', text: msg }]);
     setInput('');
     setTyping(true);
     try {
@@ -146,12 +227,24 @@ export default function CoachPage() {
       setQuick(quickReplies || OPENERS);
     } catch {
       const local = coachReply(msg, { ...ctx, seed: msgCount.current * 7 });
+      setOffline(true);
       await new Promise((r) => setTimeout(r, 600));
-      setMessages((prev) => [...prev, { id: Date.now() + 1, role: 'coach', text: local.text }]);
+      const coachMsgId = Date.now() + 1;
+      setMessages((prev) => [...prev, { id: coachMsgId, role: 'coach', text: local.text }]);
       setQuick(local.quickReplies || OPENERS);
     } finally {
       setTyping(false);
       setStreamText(null);
+    }
+  }
+
+  async function saveMessageToJournal(msg) {
+    if (!active || !token) return;
+    try {
+      await saveCoachJournal(active.id, msg.text, token);
+      setSavedIds((prev) => new Set([...prev, msg.id]));
+    } catch {
+      // silent
     }
   }
 
@@ -165,31 +258,6 @@ export default function CoachPage() {
       <Layout>
         <div className="loading-screen" style={{ minHeight: '50vh' }}>
           <div className="spinner" />
-        </div>
-      </Layout>
-    );
-  }
-
-  if (mode === 'locked') {
-    return (
-      <Layout>
-        <h1 className="page-title">Coach</h1>
-        <p className="page-sub">A warm, wise companion for the hard moments.</p>
-        <div className="card" style={{ textAlign: 'center', padding: '32px 20px' }}>
-          <div className="icon" style={{ fontSize: 48 }}>🧠</div>
-          <div className="title" style={{ fontSize: 19, fontWeight: 800, color: 'var(--cream)', margin: '10px 0 4px' }}>
-            The AI coach is a Premium feature
-          </div>
-          <p className="muted small">
-            Your coach reads your streaks, urges and journal — and talks you through cravings with real context.
-            Upgrade to unlock the full conversation.
-          </p>
-          <button className="btn btn-primary btn-block mt" onClick={() => navigate('/app/premium')}>
-            👑 Go Premium
-          </button>
-          <button className="btn btn-ghost btn-block mt" onClick={() => navigate('/app')}>
-            Maybe later
-          </button>
         </div>
       </Layout>
     );
@@ -215,20 +283,45 @@ export default function CoachPage() {
       <div>
         <h1 className="page-title">Coach</h1>
         <p className="page-sub">
-          Premium · remembers your journey · {active.name}
+          remembers your journey · {active.name}
         </p>
       </div>
 
-      <div className="chat-wrap" ref={scrollRef}>
+      <div className="chat-wrap" ref={scrollRef} onScroll={() => {
+        const el = scrollRef.current;
+        if (!el) return;
+        const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+        isAtBottom.current = atBottom;
+        setShowScrollBtn(!atBottom);
+      }}>
+        {offline && (
+          <p className="muted tiny" style={{ textAlign: 'center', marginBottom: 8 }}>
+            📴 Offline — your coach is replying from your device
+          </p>
+        )}
         <div className="chat">
           {messages.map((m) => (
             <div key={m.id} className={`bubble ${m.role}`}>
               {m.text}
+              {m.role === 'coach' && <SpeakButton key={`speak-${m.id}`} text={m.text} />}
+              {m.role === 'coach' && !savedIds.has(m.id) && (
+                <button
+                  className="btn btn-ghost btn-xs"
+                  style={{ marginTop: 6, fontSize: 11, padding: '2px 8px' }}
+                  onClick={() => saveMessageToJournal(m)}
+                >
+                  💾 Save to journal
+                </button>
+              )}
+              {m.role === 'coach' && savedIds.has(m.id) && (
+                <span className="muted tiny" style={{ marginLeft: 6 }}>✓ saved</span>
+              )}
             </div>
           ))}
           {streamText != null ? (
             <div className="bubble coach">
               {streamText}
+              <SpeakButton key="speak-stream" text={streamText} />
               <span className="stream-cursor" aria-hidden="true" />
             </div>
           ) : typing ? (
@@ -241,6 +334,11 @@ export default function CoachPage() {
             </div>
           ) : null}
         </div>
+        {showScrollBtn && (
+          <button className="scroll-bottom-btn" onClick={scrollToBottom} aria-label="Scroll to bottom">
+            ↓
+          </button>
+        )}
       </div>
 
       <div className="strategy-bar">

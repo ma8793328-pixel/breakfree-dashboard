@@ -1,13 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
 import Layout from '../components/Layout.jsx';
 import { useAuth } from '../auth.jsx';
 import { useHabits } from '../habits.jsx';
 import { useHabitDetail } from '../useHabitDetail.js';
-import { useSubscription } from '../subscription.jsx';
 import { api } from '../api.js';
 import UrgeModal from '../components/UrgeModal.jsx';
-import { urgeInsight } from '../aiCoach.js';
+import { urgeInsight, TRIGGER_LABELS, ACTION_LABELS } from '../aiCoach.js';
+import SpeakButton from '../components/SpeakButton.jsx';
 
 function formatTime(iso) {
   const d = new Date(iso);
@@ -18,8 +17,6 @@ export default function UrgesPage() {
   const { token } = useAuth();
   const { active } = useHabits();
   const { detail, loading, reload } = useHabitDetail(active?.id, token);
-  const { premium } = useSubscription();
-  const navigate = useNavigate();
   const [showModal, setShowModal] = useState(false);
   const [deep, setDeep] = useState(null);
   const [deepLoading, setDeepLoading] = useState(false);
@@ -33,7 +30,7 @@ export default function UrgesPage() {
   }, [active, detail]);
 
   useEffect(() => {
-    if (!premium || !active) return;
+    if (!active) return;
     let cancelled = false;
     setDeepLoading(true);
     api('/ai/urge-insights', { method: 'POST', token, body: { habitId: active.id } })
@@ -41,7 +38,7 @@ export default function UrgesPage() {
         if (!cancelled) setDeep(data.insight);
       })
       .catch(() => {
-        /* premium check happens via UI state */
+        /* noop */
       })
       .finally(() => {
         if (!cancelled) setDeepLoading(false);
@@ -49,7 +46,7 @@ export default function UrgesPage() {
     return () => {
       cancelled = true;
     };
-  }, [premium, active, token]);
+  }, [active, token]);
 
   if (!active) {
     return (
@@ -91,9 +88,11 @@ export default function UrgesPage() {
         </div>
       )}
 
-      {premium ? (
         <div className="card">
-          <p className="card-title">👑 Deeper analysis</p>
+          <p className="card-title" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <span>👑 Deeper analysis</span>
+            {deep && <SpeakButton text={deep.bullets.map((b) => b.text).join(' ')} />}
+          </p>
           {deepLoading && !deep ? (
             <div className="loading-screen" style={{ minHeight: '12vh' }}>
               <div className="spinner" />
@@ -108,14 +107,9 @@ export default function UrgesPage() {
               ))}
             </div>
           ) : (
-            <p className="muted small">Log a few urges to unlock deeper analysis.</p>
+            <p className="muted small">Keep logging urges to see deeper analysis.</p>
           )}
         </div>
-      ) : (
-        <button className="btn btn-ghost btn-block" onClick={() => navigate('/app/premium')}>
-          👑 Unlock deeper urge analysis
-        </button>
-      )}
 
       {loading ? (
         <div className="loading-screen" style={{ minHeight: '40vh' }}>
@@ -136,9 +130,11 @@ export default function UrgesPage() {
                 <div className="small muted">{u.intensity}/5</div>
               </div>
               <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: 600 }}>{u.trigger || 'No trigger noted'}</div>
+                <div style={{ fontWeight: 600 }}>
+                  {(u.trigger_type && TRIGGER_LABELS[u.trigger_type]) || u.trigger || 'No trigger noted'}
+                </div>
                 <div className="meta">
-                  {formatTime(u.logged_at)} · {u.resisted ? 'Resisted 💪' : 'Gave in'}
+                  {formatTime(u.logged_at)} · {u.action ? ACTION_LABELS[u.action] || u.action : u.resisted ? 'Resisted 💪' : 'Gave in'}
                 </div>
               </div>
               <span className={`badge-pill ${u.resisted ? 'ok' : 'no'}`}>{u.resisted ? 'Resisted' : 'Gave in'}</span>

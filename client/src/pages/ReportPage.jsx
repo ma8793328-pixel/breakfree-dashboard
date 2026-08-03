@@ -3,7 +3,6 @@ import { useNavigate } from 'react-router-dom';
 import Layout from '../components/Layout.jsx';
 import { useAuth } from '../auth.jsx';
 import { useHabits } from '../habits.jsx';
-import { useSubscription } from '../subscription.jsx';
 import { api } from '../api.js';
 
 function monthKey(d) {
@@ -18,7 +17,6 @@ function monthLabel(key) {
 export default function ReportPage() {
   const { token } = useAuth();
   const { active } = useHabits();
-  const { premium } = useSubscription();
   const navigate = useNavigate();
 
   const [month, setMonth] = useState(() => monthKey(new Date()));
@@ -31,7 +29,7 @@ export default function ReportPage() {
     let cancelled = false;
     setLoading(true);
     setError(null);
-    api('/premium/report', { method: 'POST', token, body: { habitId: active.id, month } })
+    api('/report', { method: 'POST', token, body: { habitId: active.id, month } })
       .then((data) => {
         if (!cancelled) setReport(data.report);
       })
@@ -58,24 +56,7 @@ export default function ReportPage() {
         <div className="empty-state">
           <div className="icon">📊</div>
           <div className="title">No habits yet</div>
-          <p>Create a habit to unlock your monthly report.</p>
-        </div>
-      </Layout>
-    );
-  }
-
-  if (!premium) {
-    return (
-      <Layout>
-        <h1 className="page-title">Monthly report</h1>
-        <p className="page-sub">Your month, gently unpacked.</p>
-        <div className="card empty-state">
-          <div className="icon">👑</div>
-          <div className="title">Premium feature</div>
-          <p>Your monthly report — streaks, savings, patterns and a personal summary — is a Premium perk.</p>
-          <button className="btn btn-primary mt" onClick={() => navigate('/app/premium')}>
-            Go Premium
-          </button>
+          <p>Create a habit to view your monthly report.</p>
         </div>
       </Layout>
     );

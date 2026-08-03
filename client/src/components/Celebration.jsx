@@ -1,7 +1,8 @@
 import { useEffect } from 'react';
 import Confetti from './Confetti.jsx';
+import SpeakButton from './SpeakButton.jsx';
 
-export default function Celebration({ kind, quote, badge, onClose }) {
+export default function Celebration({ kind, quote, badge, onClose, onShare }) {
   useEffect(() => {
     document.body.style.overflow = 'hidden';
     return () => {
@@ -20,6 +21,7 @@ export default function Celebration({ kind, quote, badge, onClose }) {
       <div className="celebration" onClick={onClose}>
         <div className="panel" onClick={(e) => e.stopPropagation()}>
           <div className="big-icon">{meta ? meta.icon : isClean ? '🌤️' : '🌅'}</div>
+          <SpeakButton text={meta ? meta.line : isClean ? 'You checked in. One more day...' : 'A slip is a data point...'} />
           <h2>{meta ? meta.title : isClean ? 'Another day, yours.' : 'That\'s okay.'}</h2>
           <p className="desc">
             {meta
@@ -33,6 +35,11 @@ export default function Celebration({ kind, quote, badge, onClose }) {
               “{quote.text}”
               <span className="source">{quote.source}</span>
             </div>
+          )}
+          {meta && onShare && (
+            <button className="btn btn-block" onClick={onShare} style={{ marginBottom: 10 }}>
+              📣 Share with the community
+            </button>
           )}
           <button className="btn btn-primary btn-block" onClick={onClose}>
             {isClean ? 'Keep going' : 'Tomorrow is a new day'}

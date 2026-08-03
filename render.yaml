@@ -26,6 +26,10 @@ services:
         sync: false
       - key: ADMIN_PASSWORD
         sync: false
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
     disk:
       name: breakfree-data
       mountPath: /var/data

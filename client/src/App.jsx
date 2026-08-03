@@ -2,7 +2,6 @@ import { useEffect } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, useNavigate, Outlet } from 'react-router-dom';
 import { AuthProvider, useAuth } from './auth.jsx';
 import { HabitProvider } from './habits.jsx';
-import { SubscriptionProvider } from './subscription.jsx';
 import { installErrorLogging, setErrorLogToken } from './errorLog.js';
 import AuthPage from './pages/AuthPage.jsx';
 import Onboarding from './pages/Onboarding.jsx';
@@ -12,11 +11,14 @@ import UrgesPage from './pages/UrgesPage.jsx';
 import JournalPage from './pages/JournalPage.jsx';
 import StatsPage from './pages/StatsPage.jsx';
 import HabitsPage from './pages/HabitsPage.jsx';
-import PremiumPage from './pages/PremiumPage.jsx';
 import DaysOutPage from './pages/DaysOutPage.jsx';
+import HelpPage from './pages/HelpPage.jsx';
+import CommunityPage from './pages/CommunityPage.jsx';
 import ReportPage from './pages/ReportPage.jsx';
 import AdminPage from './pages/AdminPage.jsx';
 import SettingsPage from './pages/SettingsPage.jsx';
+import LandingPage from './pages/LandingPage.jsx';
+import HealthPage from './pages/HealthPage.jsx';
 
 function RequireAuth() {
   const { user, loading } = useAuth();
@@ -68,11 +70,10 @@ export default function App() {
     <AuthProvider>
       <ErrorReporter />
       <HabitProvider>
-        <SubscriptionProvider>
-          <BrowserRouter>
+        <BrowserRouter>
             <Routes>
-              <Route path="/" element={<Navigate to="/app" replace />} />
               <Route element={<RequireGuest />}>
+                <Route path="/" element={<LandingPage />} />
                 <Route path="/login" element={<AuthPage mode="login" />} />
                 <Route path="/signup" element={<AuthPage mode="signup" />} />
               </Route>
@@ -83,9 +84,11 @@ export default function App() {
                 <Route path="/app/urges" element={<UrgesPage />} />
                 <Route path="/app/journal" element={<JournalPage />} />
                 <Route path="/app/stats" element={<StatsPage />} />
+                <Route path="/app/health" element={<HealthPage />} />
                 <Route path="/app/habits" element={<HabitsPage />} />
-                <Route path="/app/premium" element={<PremiumPage />} />
                 <Route path="/app/days-out" element={<DaysOutPage />} />
+                <Route path="/app/help" element={<HelpPage />} />
+                <Route path="/app/community" element={<CommunityPage />} />
                 <Route path="/app/report" element={<ReportPage />} />
                 <Route path="/app/settings" element={<SettingsPage />} />
                 <Route path="/app/admin" element={<AdminPage />} />
@@ -93,8 +96,7 @@ export default function App() {
               <Route path="*" element={<Navigate to="/app" replace />} />
             </Routes>
           </BrowserRouter>
-        </SubscriptionProvider>
-      </HabitProvider>
+        </HabitProvider>
     </AuthProvider>
   );
 }

@@ -10,7 +10,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const VAPID_FILE = process.env.VAPID_FILE || path.join(DATA_DIR, 'vapid.json');
 const VAPID_SUBJECT = 'mailto:coach@breakfree.app';
 
-export const DEFAULT_PREFS = { dailyReminder: true, urgeTips: true, milestones: true };
+export const DEFAULT_PREFS = { dailyReminder: true, urgeTips: true, milestones: true, triggerNudges: true, reminderTime: null, emailOptIn: false, digestOptIn: true, reEngageOptIn: true };
 
 export function prefsFor(user) {
   try {
@@ -63,7 +63,7 @@ export function registerPushRoutes(app, { requireAuth }) {
   });
 
   app.post('/api/push/subscribe', requireAuth, (req, res) => {
-    const { endpoint, keys } = req.body || {};
+    const { endpoint, keys, timezone } = req.body || {};
     if (!endpoint || !keys?.p256dh || !keys?.auth) {
       return res.status(400).json({ error: 'endpoint and keys are required.' });
     }
@@ -75,6 +75,14 @@ export function registerPushRoutes(app, { requireAuth }) {
          auth = excluded.auth,
          last_seen = datetime('now')`
     ).run(req.user.id, String(endpoint), String(keys.p256dh), String(keys.auth));
+    if (timezone) db.prepare('UPDATE users SET timezone = ? WHERE id = ?').run(String(timezone).slice(0, 64), req.user.id);
+    res.json({ ok: true });
+  });
+
+  app.post('/api/push/tz', requireAuth, (req, res) => {
+    const { timezone } = req.body || {};
+    if (!timezone) return res.status(400).json({ error: 'timezone is required.' });
+    db.prepare('UPDATE users SET timezone = ? WHERE id = ?').run(String(timezone).slice(0, 64), req.user.id);
     res.json({ ok: true });
   });
 
@@ -138,12 +146,14 @@ async function sendToUser(userId, payloadObj) {
   const subs = db
     .prepare('SELECT endpoint, p256dh, auth FROM push_subscriptions WHERE user_id = ?')
     .all(userId);
-  if (subs.length === 0) return;
+  if (subs.length === 0) return 0;
   const payload = JSON.stringify(payloadObj);
   const stale = [];
+  let ok = 0;
   for (const s of subs) {
     try {
       await webpush.sendNotification({ endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } }, payload);
+      ok += 1;
     } catch (e) {
       if (e?.statusCode === 404 || e?.statusCode === 410) stale.push(s.endpoint);
     }
@@ -151,6 +161,76 @@ async function sendToUser(userId, payloadObj) {
   for (const endpoint of stale) {
     db.prepare('DELETE FROM push_subscriptions WHERE endpoint = ?').run(endpoint);
   }
+  return ok;
+}
+
+// Fire-and-forget: schedule a smart pre-nudge when a pattern is detected.
+export async function scheduleTriggerNudge(userId, habitId, bucketLabel, bucketStartHour, timezone) {
+  const tz = String(timezone || 'UTC').slice(0, 64);
+  db.prepare(
+    `INSERT INTO trigger_nudges (user_id, habit_id, bucket_label, bucket_start_hour, timezone)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT (user_id, habit_id) DO UPDATE SET
+       bucket_label = excluded.bucket_label,
+       bucket_start_hour = excluded.bucket_start_hour,
+       timezone = excluded.timezone`
+  ).run(userId, habitId, bucketLabel, bucketStartHour, tz);
+}
+
+// Fire-and-forget: send a trigger nudge notification when the pre-peak window arrives.
+export async function notifyTriggerNudge(userId, habitId, bucketLabel) {
+  if (!userPrefs(userId).triggerNudges) return;
+  const sent = await sendToUser(userId, {
+    title: 'BreakFree',
+    body: `Your urge peak is usually around ${bucketLabel} — how are you feeling right now?`,
+    habitId,
+  });
+  if (sent > 0) {
+    db.prepare('UPDATE trigger_nudges SET sent_at = datetime(\'now\') WHERE user_id = ? AND habit_id = ?').run(userId, habitId);
+  }
+}
+
+// Send a trigger nudge to a specific user. Returns number of notifications sent.
+export async function sendTriggerNudge(userId, habitId) {
+  const row = db.prepare('SELECT bucket_label, bucket_start_hour, timezone, sent_at FROM trigger_nudges WHERE user_id = ? AND habit_id = ?').get(userId, habitId);
+  if (!row || row.sent_at) return 0;
+
+  const tz = String(row.timezone || 'UTC');
+  const bucketHour = Number(row.bucket_start_hour) || 0;
+  const notifyHour = (bucketHour - 1 + 24) % 24;
+  const notifyMinute = bucketHour === 0 ? 30 : 0;
+
+  let now;
+  try {
+    now = new Date(new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: 'numeric', minute: 'numeric', hour12: false }).format(new Date()));
+  } catch {
+    now = new Date();
+  }
+  const localH = now.getHours();
+  const localM = now.getMinutes();
+
+  if (localH === notifyHour && localM === notifyMinute) {
+    await notifyTriggerNudge(userId, habitId, row.bucket_label);
+    return 1;
+  }
+  return 0;
+}
+
+// Sweep all trigger nudges and fire any that are due.
+export async function sweepTriggerNudges() {
+  const nudges = db.prepare('SELECT user_id, habit_id FROM trigger_nudges WHERE sent_at IS NULL').all();
+  let total = 0;
+  for (const n of nudges) {
+    try {
+      total += await sendTriggerNudge(n.user_id, n.habit_id);
+    } catch { /* skip failed nudges */ }
+  }
+  return total;
+}
+
+// Used by the re-engagement cascade / digest (parity with cf/src/engage.js).
+export async function sendPushToUser(userId, payloadObj) {
+  return sendToUser(userId, payloadObj);
 }
 
 // Sweep subscriptions that haven't been seen in 90 days (devices abandoned

@@ -37,7 +37,7 @@ function hourBucket(iso) {
 
 export async function buildReport(env, habit, month) {
   const prefix = `${month}-`;
-  const checkins = (await env.DB.prepare('SELECT date, status FROM checkins WHERE habit_id = ? AND date LIKE ? ORDER BY date').bind(habit.id, `${prefix}%`).all()).results;
+  const checkins = (await env.DB.prepare('SELECT date, status, forgiven FROM checkins WHERE habit_id = ? AND date LIKE ? ORDER BY date').bind(habit.id, `${prefix}%`).all()).results;
   const urges = (await env.DB.prepare('SELECT intensity, trigger, resisted, logged_at FROM urges WHERE habit_id = ? AND logged_at LIKE ?').bind(habit.id, `${prefix}%`).all()).results;
   const jc = await env.DB.prepare('SELECT COUNT(*) AS c FROM journals WHERE habit_id = ? AND date LIKE ?').bind(habit.id, `${prefix}%`).first();
   const journalCount = jc?.c || 0;
@@ -93,7 +93,7 @@ export async function buildReport(env, habit, month) {
     `This month you logged ${totalDays} ${totalDays === 1 ? 'day' : 'days'} — ${clean.length} clean and ${slips.length} ${slips.length === 1 ? 'slip' : 'slips'} (${cleanPct}% clean).`,
   ];
   if (longestRun >= 5) summaryParts.push(`Your best run was ${longestRun} clean ${longestRun === 1 ? 'day' : 'days'} in a row — proof of what's possible.`);
-  if (moneySaved > 0) summaryParts.push(`That saved you about $${moneySaved.toLocaleString()} in habit costs.`);
+  if (moneySaved > 0) summaryParts.push(`That saved you about £${moneySaved.toLocaleString()} in habit costs.`);
   if (timeSaved > 0) summaryParts.push(`And won back roughly ${timeSaved} hours.`);
   if (urges.length) summaryParts.push(`You logged ${urges.length} urges and resisted ${resistedPct}% of them.`);
   if (journalCount) summaryParts.push(`You wrote ${journalCount} journal ${journalCount === 1 ? 'entry' : 'entries'} — good thinking fuel.`);
@@ -133,7 +133,7 @@ export async function buildReport(env, habit, month) {
 }
 
 export async function buildRecoveryPlan(env, habit) {
-  const checkins = (await env.DB.prepare('SELECT date, status FROM checkins WHERE habit_id = ? ORDER BY date DESC LIMIT 14').bind(habit.id).all()).results;
+  const checkins = (await env.DB.prepare('SELECT date, status, forgiven FROM checkins WHERE habit_id = ? ORDER BY date DESC LIMIT 14').bind(habit.id).all()).results;
   const recentSlip = checkins.find((c) => c.status === 'slip')?.date || null;
   const urges = (await env.DB.prepare('SELECT trigger, resisted FROM urges WHERE habit_id = ? ORDER BY logged_at DESC LIMIT 20').bind(habit.id).all()).results;
   const topTrigger = mode(urges.map((u) => u.trigger));

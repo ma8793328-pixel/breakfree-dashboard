@@ -49,9 +49,6 @@ export default function DaysOutPage() {
         setIdeas(e.data.ideas);
         setSource('fallback');
         setError(null);
-      } else if (e.status === 402) {
-        setError('Days Out is a Premium feature.');
-        setIdeas(null);
       } else {
         setError(e.message);
         setIdeas(null);
@@ -90,24 +87,26 @@ export default function DaysOutPage() {
   if (error && ideas === null) {
     return (
       <Layout>
-        <h1 className="page-title">Days out</h1>
-        <p className="page-sub">Nearby places to go when you need to move.</p>
-        <div className="card empty-state">
-          <div className="icon">👑</div>
-          <div className="title">Premium feature</div>
-          <p>{error}</p>
-          <button className="btn btn-primary mt" onClick={() => navigate('/app/premium')}>
-            Go Premium
-          </button>
-        </div>
+        <h1 className="page-title">Change of scene</h1>
+        <p className="page-sub">An urge is a wave — moving usually rides it out. Find somewhere nearby to go.</p>
+        {error && (
+          <div className="card empty-state">
+            <div className="icon">⚠️</div>
+            <div className="title">Couldn't load suggestions</div>
+            <p>{error}</p>
+            <button className="btn btn-primary mt" onClick={searchNearby}>
+              Try again
+            </button>
+          </div>
+        )}
       </Layout>
     );
   }
 
   return (
     <Layout>
-      <h1 className="page-title">Days out</h1>
-      <p className="page-sub">When an urge hits, change the scene. Here's where to go.</p>
+      <h1 className="page-title">Change of scene</h1>
+      <p className="page-sub">When an urge hits, change the scene. Here's where to go nearby.</p>
 
       <div className="card">
         <p className="card-title">📍 Find somewhere nearby</p>

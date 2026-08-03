@@ -30,6 +30,63 @@ export function checkinNote(ctx = {}) {
   return `I noticed your ${label} was rated ${score}/5 in today's check-in — ${tip}.`;
 }
 
+// A short, proactive daily note grounded in the user's own data.
+export function dailyCoachNote(ctx = {}) {
+  const s = ctx?.streak ?? 0;
+  const ci = ctx?.dailyCheckin || null;
+  const todayUrges = ctx?.todayUrges ?? 0;
+  const lines = [];
+  if (s > 0) {
+    if (s === 1) lines.push('Day 1 down — the hardest day is behind you, and you already know you can do hard things.');
+    else if (s === 2) lines.push('Day 2. Momentum is quietly building — yesterday you proved you can.');
+    else if (s === 3) lines.push('Three days clean. That\u2019s a habit starting to tip your way.');
+    else if (s === 4) lines.push('Day 4 is statistically the hardest. You\u2019re not struggling — you\u2019re right on schedule.');
+    else if (s === 5) lines.push('Day 5 — your taste and smell are sharpening. That\u2019s your body healing, not your imagination.');
+    else if (s === 6) lines.push('Day 6. Almost a week — the guard is still up, and that\u2019s exactly right.');
+    else if (s === 7) lines.push('One week clean today. If you can do seven days, you can do seven more.');
+    else if (s === 14) lines.push('Two weeks. The physical cravings are already quieter than they were.');
+    else if (s === 30) lines.push('Thirty days — a full month. This isn\u2019t a fluke, it\u2019s a new baseline.');
+    else if (s === 60) lines.push('Sixty days clean. You\u2019re in the long game now.');
+    else if (s % 30 === 0) lines.push(`${s} days clean. Keep showing up the same boring, brilliant way.`);
+    else lines.push(`Day ${s}. The streak does the heavy lifting — you just keep today clean.`);
+  } else if ((ctx?.totalSlips ?? 0) > 0) {
+    lines.push('A slip doesn\u2019t erase what you\u2019ve learned — it just adds a fresh page. Today\u2019s page is yours to write.');
+  } else {
+    lines.push('Every streak starts with one clean day. Make today that day.');
+  }
+  if (ci) {
+    const lows = [];
+    if (ci.energy != null && ci.energy <= 2) lows.push('energy');
+    if (ci.sleep != null && ci.sleep <= 2) lows.push('sleep');
+    if (ci.mood != null && ci.mood <= 2) lows.push('mood');
+    if (lows.length) lines.push(`Your ${lows.join(' and ')} is running low today — treat urges like weather you can wait out, not orders.`);
+    else if ((ci.energy ?? 0) >= 4 && (ci.mood ?? 0) >= 4) lines.push('Strong energy and mood today — a good day to bank a clean check-in.');
+    else lines.push('Your check-in is saved — keep the basics boring: water, food, rest.');
+  }
+  if (todayUrges > 0) lines.push(`You\u2019ve logged ${todayUrges} urge${todayUrges === 1 ? '' : 's'} today — naming them is the win. Each one you log, you shrink.`);
+  else if (s > 0) lines.push('No urges logged today yet — sometimes the silence is the strongest sign.');
+  if (ctx?.reason) lines.push(`Remember why: \u201C${ctx.reason}\u201D.`);
+  return lines.join(' ');
+}
+
+// ---------- Day 3–7 wall (high-support window) ----------
+
+export const WALL_DAY_LINES = {
+  3: 'Day 3 — nicotine has fully cleared your system. That pull you feel is biology asking for the old chemical comfort, not weakness.',
+  4: "Day 4 is statistically the hardest. You're not struggling — you're right on schedule.",
+  5: "Day 5 — your taste and smell are sharpening. That's your body healing, not your imagination.",
+  6: 'Day 6. The acute phase is nearly over. Keep the guard up — urges usually spike right around now.',
+  7: 'Day 7 — you made it through the wall. One week down.',
+};
+
+export function wallMessage(day) {
+  return WALL_DAY_LINES[day] || null;
+}
+
+export const SURVIVAL_NOTE =
+  'You\u2019re in survival mode. Check in twice today and log every urge — awareness is your armour.';
+
+
 function cleanDays(ctx) {
   return ctx?.totalClean ?? 0;
 }
@@ -499,6 +556,25 @@ function extractPhrase(content) {
 
 // ---------- Urge insights ----------
 
+export const TRIGGER_LABELS = {
+  stress: '😫 Stress',
+  boredom: '😴 Boredom',
+  social: '🎉 Social',
+  emotional: '🌧️ Emotional',
+  place: '📍 Place / routine',
+  habit: '🍺 Around the habit',
+  other: '🗒️ Other',
+};
+
+export const ACTION_LABELS = {
+  waited: 'Waited it out',
+  scene: 'Changed the scene',
+  breathed: 'Breathed / grounded',
+  talked: 'Talked to someone',
+  distracted: 'Distracted myself',
+  'gave-in': 'Gave in',
+};
+
 function hourBucket(iso) {
   const h = new Date(iso).getHours();
   if (h >= 5 && h < 12) return 'mornings';
@@ -511,13 +587,22 @@ function bestTrigger(urges) {
   const counts = {};
   let best = null;
   for (const u of urges) {
-    const t = (u.trigger || '').trim().toLowerCase();
+    const t = (u.trigger_type && TRIGGER_LABELS[u.trigger_type]) || (u.trigger || '').trim().toLowerCase();
     if (!t) continue;
     const n = (counts[t] || 0) + 1;
     counts[t] = n;
     if (!best || n > best.n) best = { t, n };
   }
   return best ? { trigger: best.t, n: best.n } : null;
+}
+
+function bestAction(urges) {
+  const counts = {};
+  for (const u of urges) {
+    const a = u.action ? ACTION_LABELS[u.action] || u.action : u.resisted ? 'Resisted' : 'Gave in';
+    counts[a] = (counts[a] || 0) + 1;
+  }
+  return Object.entries(counts).sort((a, b) => b[1] - a[1])[0] || null;
 }
 
 export function urgeInsight(urges = [], ctx = {}) {
@@ -534,6 +619,7 @@ export function urgeInsight(urges = [], ctx = {}) {
   }
   const peakPeriod = Object.entries(peak).sort((a, b) => b[1] - a[1])[0];
   const trig = bestTrigger(urges);
+  const act = bestAction(urges);
 
   const bullets = [];
   if (trig) {
@@ -553,6 +639,15 @@ export function urgeInsight(urges = [], ctx = {}) {
     bullets.push({
       label: 'Peak window',
       text: `Urges cluster in the ${peakPeriod[0]} — have a small ritual ready then (water, a walk, 10-minute delay).`,
+    });
+  }
+  if (act) {
+    const gaveIn = urges.filter((u) => u.action === 'gave-in').length;
+    bullets.push({
+      label: 'What works',
+      text: gaveIn === 0
+        ? `You've never logged a slip — when urges come, "${act[0]}" is your go-to. Keep that tool sharp.`
+        : `"${act[0]}" is your most-used move. You've logged ${gaveIn} ${gaveIn === 1 ? 'slip' : 'slips'} — each one is intel on what to plan around next.`,
     });
   }
 
