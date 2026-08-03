@@ -1538,6 +1538,12 @@ app.get('/api/admin/status', async (c) => {
     healthy: nudgeHealthy,
   };
   const serverHealthy = nudgeHealthy && errors24h === 0;
+  const fabTotal = Number((await c.env.DB.prepare("SELECT COUNT(*) AS n FROM app_events WHERE event_type = 'fab_opened'").first())?.n || 0);
+  const fabModes = (await c.env.DB.prepare(
+    `SELECT event_type, COUNT(*) AS n FROM app_events WHERE event_type IN ('urge_mode_breathe','urge_mode_reframe','urge_mode_shift','urge_mode_log') GROUP BY event_type`
+  ).all()).results;
+  const modeMap = {};
+  for (const m of fabModes) modeMap[m.event_type] = Number(m.n || 0);
   return c.json({
     uptime,
     startedAt: new Date(Date.now() - uptime * 1000).toISOString(),
@@ -1555,6 +1561,15 @@ app.get('/api/admin/status', async (c) => {
       journalCorrelation,
     },
     errorTrend,
+    fab: {
+      totalOpens: fabTotal,
+      modes: {
+        breathe: modeMap['urge_mode_breathe'] || 0,
+        reframe: modeMap['urge_mode_reframe'] || 0,
+        shift: modeMap['urge_mode_shift'] || 0,
+        log: modeMap['urge_mode_log'] || 0,
+      },
+    },
   });
 });
 

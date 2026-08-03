@@ -489,6 +489,24 @@ export default function AdminPage() {
         </div>
       )}
 
+      {status?.fab && (
+        <div className="card">
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+            <p className="card-title" style={{ margin: 0 }}>⚡ FAB Urge Panel</p>
+            <span className="meta">Total opens: {status.fab.totalOpens}</span>
+          </div>
+          <div className="metric-grid" style={{ gridTemplateColumns: 'repeat(4, 1fr)' }}>
+            <StatCard label="Breathe" value={status.fab.modes.breathe} sub="Pause & Breathe" accent="var(--sage)" />
+            <StatCard label="Reframe" value={status.fab.modes.reframe} sub="Thought reframe" accent="var(--accent)" />
+            <StatCard label="Shift" value={status.fab.modes.shift} sub="Move / distract" accent="#f59e0b" />
+            <StatCard label="Log" value={status.fab.modes.log} sub="Urge log" accent="var(--muted-2)" />
+          </div>
+          <p className="muted small" style={{ marginTop: 8 }}>
+            Tracks which coping mode users choose when the urge hits. Used to refine content and UX.
+          </p>
+        </div>
+      )}
+
       {status?.notifications && (
         <div className="card">
           <p className="card-title">🔔 Scheduled nudges</p>
