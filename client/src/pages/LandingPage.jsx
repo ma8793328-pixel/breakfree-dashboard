@@ -30,7 +30,7 @@ const STEPS = [
 
 function HealingChart() {
   return (
-    <figure className="landing-chart" role="img" aria-label="Chart showing improvement in sleep quality and a decrease in resting heart rate from day 1 to day 7">
+    <figure className="landing-chart" role="img" aria-label="Chart showing improvement in sleep quality, decrease in resting heart rate, and money saved from day 1 to day 7">
       <svg viewBox="0 0 480 220" className="landing-chart-svg" aria-hidden="true">
         <g className="landing-chart-grid">
           {[0, 1, 2, 3, 4].map((i) => (
@@ -60,6 +60,18 @@ function HealingChart() {
           <circle cx="460" cy="148" r="6" />
         </g>
 
+        <g className="landing-chart-money">
+          <polyline
+            points="40,170 110,145 180,120 250,95 320,72 390,55 460,38"
+            fill="none"
+            strokeWidth="4"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            strokeDasharray="8 4"
+          />
+          <circle cx="460" cy="38" r="6" />
+        </g>
+
         {[1, 2, 3, 4, 5, 6, 7].map((d, i) => (
           <text key={d} x={40 + i * 70} y="210" textAnchor="middle" className="landing-chart-day">
             Day {d}
@@ -69,6 +81,7 @@ function HealingChart() {
       <figcaption className="landing-chart-legend">
         <span><i className="dot dot-sleep" /> Sleep quality</span>
         <span><i className="dot dot-hr" /> Resting heart rate</span>
+        <span><i className="dot dot-money" /> Money saved</span>
       </figcaption>
     </figure>
   );
@@ -104,7 +117,7 @@ export default function LandingPage() {
         </nav>
         <div className="landing-actions">
           <Link className="btn btn-ghost btn-sm" to="/login">Log in</Link>
-          <Link className="btn btn-primary btn-sm" to="/signup">Start free</Link>
+          <Link className="btn btn-primary btn-sm" to="/signup">Always Free</Link>
         </div>
       </header>
 
@@ -119,9 +132,12 @@ export default function LandingPage() {
           health trend you can watch heal.
         </p>
         <div className="landing-hero-actions">
-          <Link className="btn btn-primary btn-lg" to="/signup">Start your free journey</Link>
+          <Link className="btn btn-primary btn-lg" to="/signup">Always Free. No Credit Card.</Link>
           <a className="btn btn-ghost btn-lg" href="#science">Read the science</a>
         </div>
+        <p className="landing-account-link" style={{ marginTop: 10 }}>
+          ✅ 100% Free Forever — No credit card required. We believe recovery is a human right.
+        </p>
         <p className="landing-account-link">
           <Link to="/login">I already have an account</Link>
         </p>
@@ -131,16 +147,17 @@ export default function LandingPage() {
           <span className="landing-proof-count">
             {shareTotal != null && shareTotal > 0
               ? `${shareTotal.toLocaleString()} milestone${shareTotal === 1 ? '' : 's'} reached by the community`
-              : 'Free to start · no credit card needed'}
+              : 'Always free · no credit card · no catch'}
           </span>
         </div>
       </section>
 
       <section className="landing-section" id="habits">
-        <h2 className="landing-h2">Works for any habit</h2>
+        <h2 className="landing-h2">All habits. One app.</h2>
         <p className="landing-sub landing-sub-narrow">
-          Nicotine is the classic case — on day 3 it leaves the body and fights back for a week.
-          The same withdrawal curve shows up for caffeine, sugar, drinking, scrolling and more.
+          No need for five different apps. BreakFree covers every habit with the same toolkit —
+          nicotine, caffeine, sugar, drinking, scrolling, vaping, gaming, gambling and beyond.
+          One coach, one streak, one place to rebuild.
         </p>
         <div className="landing-habits" role="list" aria-label="Supported habits">
           {HABITS.map((h) => (
@@ -174,7 +191,7 @@ export default function LandingPage() {
 
       <section className="landing-cta-strip">
         <span>Ready when you are.</span>
-        <Link className="btn btn-primary" to="/signup">Start free</Link>
+        <Link className="btn btn-primary" to="/signup">Always Free</Link>
       </section>
 
       <section className="landing-section" id="science">
@@ -186,22 +203,23 @@ export default function LandingPage() {
               Day 3 is when nicotine leaves the body — and when the craving fights back hardest.
               BreakFree switches into survival mode right there: extra nudges, twice-daily
               reminders, and a recovery readout that shows what your body is repairing right now.
-              The same curve applies to any habit you choose.
+              The same curve applies to any habit you choose — including gambling, where every day
+              clean is money back in your pocket.
             </p>
             <div className="landing-coach" aria-label="Example coach message">
               <span className="landing-coach-avatar">🧑‍🏫</span>
               <p className="landing-coach-bubble">
-                Coach: “Day 4 is tough — but your resting heart rate is already coming down.
-                Try the 2-minute breathing exercise.”
+                Coach: “Day 4 is tough — but your resting heart rate is already coming down
+                and you've saved £X this week. Try the 2-minute breathing exercise.”
               </p>
             </div>
+            </div>
             <div className="landing-science-actions">
-              <Link className="btn btn-primary" to="/signup">Start free</Link>
+              <Link className="btn btn-primary" to="/signup">Always Free</Link>
               <a className="btn btn-ghost" href="#how">See how it works</a>
             </div>
+            <HealingChart />
           </div>
-          <HealingChart />
-        </div>
       </section>
 
       <section className="landing-section" id="features">
@@ -228,12 +246,45 @@ export default function LandingPage() {
         </div>
       </section>
 
+      <section className="landing-section" id="why">
+        <div style={{ maxWidth: 720, margin: '0 auto', textAlign: 'center' }}>
+          <span style={{ fontSize: 40, display: 'block', marginBottom: 8 }}>🛡️</span>
+          <h2 className="landing-h2">Recovery Shouldn&apos;t Have a Price Tag.</h2>
+          <p className="landing-sub" style={{ textAlign: 'left' }}>
+            Addiction doesn't care about your bank balance. When you're fighting the "Day 3–7 Wall" —
+            whether it's nicotine, gambling, alcohol, or scrolling — the last thing you need is a paywall
+            blocking your path to help.
+          </p>
+          <p className="landing-sub" style={{ textAlign: 'left' }}>
+            BreakFree was built on a simple belief: <strong>Survival mode is for everyone.</strong>
+          </p>
+          <p className="landing-sub" style={{ textAlign: 'left' }}>
+            We saw too many people hit rock bottom, only to be turned away by expensive subscriptions
+            or "freemium" traps that gatekeep the very tools they needed to survive. We decided to change that.
+          </p>
+          <p className="landing-sub" style={{ textAlign: 'left' }}>
+            Built on open, scalable technology (Cloudflare & Llama), BreakFree is <strong>100% free, forever</strong>.
+            No credit cards. No hidden fees. No ads. Just a powerful, AI-driven coach that knows your journey,
+            tracks your "receipts of recovery," and stands by you through the hardest days.
+          </p>
+          <p className="landing-sub" style={{ textAlign: 'left', marginBottom: 0 }}>
+            Whether you are saving your health, your finances, or your relationships, we are here to ensure
+            you never have to fight alone.
+            <br />
+            <strong>Your journey. Your recovery. Zero cost.</strong>
+          </p>
+        </div>
+      </section>
+
       <section className="landing-cta">
         <h2 className="landing-h2">Your streak starts with one check-in.</h2>
         <div className="landing-hero-actions">
-          <Link className="btn btn-primary btn-lg" to="/signup">Start today — free</Link>
+          <Link className="btn btn-primary btn-lg" to="/signup">Always Free. No Credit Card.</Link>
           <a className="btn btn-ghost btn-lg" href="#science">Read the science</a>
         </div>
+        <p className="muted small" style={{ marginTop: 10 }}>
+          ✅ 100% Free Forever · No credit card · No hidden fees · No ads
+        </p>
       </section>
 
       <footer className="landing-footer">
@@ -244,6 +295,8 @@ export default function LandingPage() {
         <span className="muted small">Built to get you through the wall.</span>
         <br />
         <a href="mailto:support@breakfree.app" className="legal-link">support@breakfree.app</a>
+        <span className="legal-link" style={{ margin: '0 8px' }}>·</span>
+        <a href="/legal/privacy" className="legal-link">Privacy & Data Promise</a>
       </footer>
     </div>
   );

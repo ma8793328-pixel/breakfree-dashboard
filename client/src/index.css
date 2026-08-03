@@ -3300,6 +3300,14 @@ a {
   fill: var(--accent-strong);
 }
 
+.landing-chart-money polyline {
+  stroke: #f59e0b;
+}
+
+.landing-chart-money circle {
+  fill: #f59e0b;
+}
+
 .landing-chart-day {
   fill: var(--muted-2);
   font-size: 12px;
@@ -3329,6 +3337,10 @@ a {
 
 .dot-hr {
   background: var(--accent-strong);
+}
+
+.dot-money {
+  background: #f59e0b;
 }
 
 .landing-feature {
