@@ -212,7 +212,7 @@ export function coachReply(message, ctx = {}) {
 
   const quick = (arr) => ({ quickReplies: arr });
 
-  const urgeQ = ["I'm having an urge right now", "Give me a quick strategy", "Help me distract myself"];
+  const urgeQ = ["I'm having an urge right now", "Give me a quick strategy", "Help me distract myself", "Open urge toolkit"];
   const helpQ = ["Give me a strategy", "Motivate me", "How am I doing?"];
   const motiQ = ["Why is this worth it?", "Give me a strategy", "I feel like giving up"];
   const celebrateQ = ["I had a win today", "What should I do today?", "Motivate me"];
@@ -296,7 +296,17 @@ export function coachReply(message, ctx = {}) {
   }
 
   // ---- Urge / craving / trigger ----
-  if (/(urge|urges|craving|crave|tempted|so hard|itch|trigger|want one|dying to|want to (smoke|drink|eat|use|check|scroll|relapse|slip)|need (a )?(weed|smoke|cig|cigarette|joint|vape|hit|blunt|bong|nicotine)|want (a )?(weed|cig|cigarette|joint|vape|hit|blunt|bong|smoke|nicotine))/.test(low)) {
+  if (/(urge|urges|craving|crave|tempted|so hard|itch|trigger|want one|dying to|want to (smoke|drink|eat|use|check|scroll|relapse|slip)|need (a )?(weed|smoke|cig|cigarette|joint|vape|hit|blunt|bong|nicotine)|want (a )?(weed|cig|cigarette|joint|vape|hit|blunt|bong|smoke|nicotine)|urge toolkit|tools|library|strategies)/.test(low)) {
+    const wantsTools = /urge toolkit|tools|library|strategies/.test(low);
+    if (wantsTools) {
+      return {
+        text: pick([
+          `The Urge Toolkit is your full library of coping strategies — from grounding exercises to cognitive scripts. You can find it anytime at /app/urge-tools. Right now, what do you need: a quick breathing exercise, a thought reframe, or just something to log?`,
+          `I love that you're looking for tools — that's exactly how you win this. Check out the full Urge Toolkit at /app/urge-tools. In the meantime, want me to walk you through a 2-minute breathing exercise or a quick thought reframe?`,
+        ], seed),
+        ...quick(["Open urge toolkit", "I'm having an urge right now", "Help me calm down now"]),
+      };
+    }
     return urgeResponse();
   }
 

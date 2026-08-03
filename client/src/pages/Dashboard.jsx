@@ -7,6 +7,7 @@ import { api, localDate, forgiveCheckin, spendShieldToken } from '../api.js';
 import { MILESTONES, pickQuote, unitLabel } from '../data.js';
 import { dailyCoachNote, wallMessage, SURVIVAL_NOTE } from '../aiCoach.js';
 import UrgeModal from '../components/UrgeModal.jsx';
+import UrgeQuickPanel from '../components/UrgeQuickPanel.jsx';
 import Celebration from '../components/Celebration.jsx';
 import ShareCard from '../components/ShareCard.jsx';
 import Badge from '../components/Badge.jsx';
@@ -62,6 +63,7 @@ export default function Dashboard() {
   const [slipTrigger, setSlipTrigger] = useState('');
   const [slipResetDone, setSlipResetDone] = useState(false);
   const [showUrge, setShowUrge] = useState(false);
+  const [showUrgeQuick, setShowUrgeQuick] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [recovery, setRecovery] = useState(null);
   const [recoveryBusy, setRecoveryBusy] = useState(false);
@@ -796,7 +798,7 @@ export default function Dashboard() {
             </p>
           </div>
         </div>
-        <button className="btn btn-primary btn-block mt" onClick={() => setShowUrge(true)}>
+        <button className="btn btn-primary btn-block mt" onClick={() => setShowUrgeQuick(true)}>
           ⚡ Log an urge
         </button>
       </div>
@@ -818,9 +820,9 @@ export default function Dashboard() {
 
       <button
         className="fab"
-        onClick={() => setShowUrge(true)}
-        aria-label="Log an urge"
-        title="Log an urge"
+        onClick={() => setShowUrgeQuick(true)}
+        aria-label="Urge quick actions"
+        title="Need help with an urge?"
       >
         ⚡
       </button>
@@ -1067,6 +1069,7 @@ export default function Dashboard() {
         />
       )}
 
+      {showUrgeQuick && <UrgeQuickPanel habitId={active.id} onClose={() => setShowUrgeQuick(false)} />}
       {showUrge && <UrgeModal habitId={active.id} onClose={() => setShowUrge(false)} onSaved={refresh} />}
 
       {recovery && (
@@ -1096,3 +1099,8 @@ export default function Dashboard() {
     </Layout>
   );
 }
+
+
+
+
+

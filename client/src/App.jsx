@@ -22,6 +22,7 @@ import HealthPage from './pages/HealthPage.jsx';
 import LegalPage from './pages/LegalPage.jsx';
 import ForgotPasswordPage from './pages/ForgotPasswordPage.jsx';
 import ResetPasswordPage from './pages/ResetPasswordPage.jsx';
+import UrgeToolsPage from './pages/UrgeToolsPage.jsx';
 
 function RequireAuth() {
   const { user, loading } = useAuth();
@@ -99,6 +100,7 @@ export default function App() {
                 <Route path="/app/report" element={<ReportPage />} />
                 <Route path="/app/settings" element={<SettingsPage />} />
                 <Route path="/app/admin" element={<AdminPage />} />
+                <Route path="/app/urge-tools" element={<UrgeToolsPage />} />
               </Route>
               <Route path="*" element={<Navigate to="/app" replace />} />
             </Routes>
