@@ -273,6 +273,8 @@ app.post('/api/auth/signup', async (c) => {
   const em = String(email).toLowerCase().trim();
   const existing = await c.env.DB.prepare('SELECT id FROM users WHERE email = ?').bind(em).first();
   if (existing) return c.json({ error: 'An account with that email already exists.' }, 409);
+  const blacklisted = await c.env.DB.prepare('SELECT id FROM blacklist WHERE email = ?').bind(em).first();
+  if (blacklisted) return c.json({ error: 'This email address has been blocked from signing up.' }, 403);
   const hash = await hashPassword(password);
   const info = await c.env.DB.prepare('INSERT INTO users (email, password_hash) VALUES (?, ?)').bind(em, hash).run();
   const user = { id: Number(info.meta.last_row_id), email: em, role: 'user' };
@@ -1833,6 +1835,103 @@ app.post('/api/admin/grant-premium', async (c) => {
   ).bind(targetId, `+${days} days`, `+${days} days`).run();
   const sub = await c.env.DB.prepare('SELECT plan, status, renews_at FROM subscriptions WHERE user_id = ?').bind(targetId).first();
   return c.json({ ok: true, user: { id: target.id, email: target.email }, subscription: sub });
+});
+
+// ---------- admin user management ----------
+app.get('/api/admin/users', async (c) => {
+  const u = userOf(c);
+  if (!u) return c.json({ error: 'Not authenticated' }, 401);
+  if (u.role !== 'admin') return c.json({ error: 'Admin access required.' }, 403);
+  const q = (c.req.query('q') || '').trim().toLowerCase();
+  const rows = await c.env.DB.prepare(
+    `SELECT id, email, role, created_at FROM users ${q ? 'WHERE lower(email) LIKE ?' : ''} ORDER BY id DESC LIMIT 100`
+  ).bind(q ? `%${q}%` : null).all();
+  return c.json({ users: rows.results });
+});
+
+app.post('/api/admin/users/:id/block', async (c) => {
+  const u = userOf(c);
+  if (!u) return c.json({ error: 'Not authenticated' }, 401);
+  if (u.role !== 'admin') return c.json({ error: 'Admin access required.' }, 403);
+  const targetId = Number(c.req.param('id'));
+  const target = await c.env.DB.prepare('SELECT id, email, role FROM users WHERE id = ?').bind(targetId).first();
+  if (!target) return c.json({ error: 'User not found.' }, 404);
+  if (target.role === 'admin') return c.json({ error: 'Cannot block another admin.' }, 400);
+  const reason = (await c.req.json().catch(() => ({}))).reason || '';
+  await c.env.DB.prepare('INSERT OR IGNORE INTO blacklist (email, reason, blocked_by) VALUES (?, ?, ?)').bind(target.email, reason, u.id).run();
+  await c.env.DB.prepare('DELETE FROM users WHERE id = ?').bind(targetId).run();
+  await c.env.DB.prepare('INSERT INTO admin_audit_log (admin_id, action, detail) VALUES (?, ?, ?)').bind(u.id, 'block_user', `Blocked and deleted user id=${targetId} email=${target.email} reason=${reason}`);
+  return c.json({ ok: true });
+});
+
+app.post('/api/admin/users/:id/unblock', async (c) => {
+  const u = userOf(c);
+  if (!u) return c.json({ error: 'Not authenticated' }, 401);
+  if (u.role !== 'admin') return c.json({ error: 'Admin access required.' }, 403);
+  const targetId = Number(c.req.param('id'));
+  const target = await c.env.DB.prepare('SELECT id, email FROM users WHERE id = ?').bind(targetId).first();
+  if (!target) return c.json({ error: 'User not found.' }, 404);
+  await c.env.DB.prepare('DELETE FROM blacklist WHERE email = ?').bind(target.email).run();
+  await c.env.DB.prepare('INSERT INTO admin_audit_log (admin_id, action, detail) VALUES (?, ?, ?)').bind(u.id, 'unblock_user', `Unblocked user id=${targetId} email=${target.email}`);
+  return c.json({ ok: true });
+});
+
+app.post('/api/admin/users/:id/make-admin', async (c) => {
+  const u = userOf(c);
+  if (!u) return c.json({ error: 'Not authenticated' }, 401);
+  if (u.role !== 'admin') return c.json({ error: 'Admin access required.' }, 403);
+  const targetId = Number(c.req.param('id'));
+  const target = await c.env.DB.prepare('SELECT id, email FROM users WHERE id = ?').bind(targetId).first();
+  if (!target) return c.json({ error: 'User not found.' }, 404);
+  await c.env.DB.prepare('UPDATE users SET role = ? WHERE id = ?').bind('admin', targetId).run();
+  await c.env.DB.prepare('INSERT OR IGNORE INTO admin_roles (user_id, granted_by) VALUES (?, ?)').bind(targetId, u.id).run();
+  await c.env.DB.prepare('INSERT INTO admin_audit_log (admin_id, action, detail) VALUES (?, ?, ?)').bind(u.id, 'make_admin', `Made user id=${targetId} email=${target.email} an admin`);
+  return c.json({ ok: true });
+});
+
+app.post('/api/admin/users/:id/remove-admin', async (c) => {
+  const u = userOf(c);
+  if (!u) return c.json({ error: 'Not authenticated' }, 401);
+  if (u.role !== 'admin') return c.json({ error: 'Admin access required.' }, 403);
+  const targetId = Number(c.req.param('id'));
+  if (targetId === u.id) return c.json({ error: 'Cannot remove your own admin role.' }, 400);
+  const target = await c.env.DB.prepare('SELECT id, email, role FROM users WHERE id = ?').bind(targetId).first();
+  if (!target) return c.json({ error: 'User not found.' }, 404);
+  if (target.role !== 'admin') return c.json({ error: 'User is not an admin.' }, 400);
+  await c.env.DB.prepare('UPDATE users SET role = ? WHERE id = ?').bind('user', targetId).run();
+  await c.env.DB.prepare('INSERT INTO admin_audit_log (admin_id, action, detail) VALUES (?, ?, ?)').bind(u.id, 'remove_admin', `Removed admin from user id=${targetId} email=${target.email}`);
+  return c.json({ ok: true });
+});
+
+app.get('/api/admin/blacklist', async (c) => {
+  const u = userOf(c);
+  if (!u) return c.json({ error: 'Not authenticated' }, 401);
+  if (u.role !== 'admin') return c.json({ error: 'Admin access required.' }, 403);
+  const rows = (await c.env.DB.prepare('SELECT b.id, b.email, b.reason, b.created_at, u.email AS blocked_by_email FROM blacklist b LEFT JOIN users u ON u.id = b.blocked_by ORDER BY b.id DESC').all()).results;
+  return c.json({ blacklist: rows });
+});
+
+app.post('/api/admin/blacklist', async (c) => {
+  const u = userOf(c);
+  if (!u) return c.json({ error: 'Not authenticated' }, 401);
+  if (u.role !== 'admin') return c.json({ error: 'Admin access required.' }, 403);
+  const { email, reason } = await c.req.json().catch(() => ({}));
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return c.json({ error: 'A valid email address is required.' }, 400);
+  await c.env.DB.prepare('INSERT OR IGNORE INTO blacklist (email, reason, blocked_by) VALUES (?, ?, ?)').bind(String(email).toLowerCase().trim(), reason || '', u.id).run();
+  await c.env.DB.prepare('INSERT INTO admin_audit_log (admin_id, action, detail) VALUES (?, ?, ?)').bind(u.id, 'blacklist_email', `Blacklisted email ${email} reason=${reason || 'none'}`);
+  return c.json({ ok: true });
+});
+
+app.delete('/api/admin/blacklist/:id', async (c) => {
+  const u = userOf(c);
+  if (!u) return c.json({ error: 'Not authenticated' }, 401);
+  if (u.role !== 'admin') return c.json({ error: 'Admin access required.' }, 403);
+  const id = Number(c.req.param('id'));
+  const row = await c.env.DB.prepare('SELECT id, email FROM blacklist WHERE id = ?').bind(id).first();
+  if (!row) return c.json({ error: 'Blacklist entry not found.' }, 404);
+  await c.env.DB.prepare('DELETE FROM blacklist WHERE id = ?').bind(id).run();
+  await c.env.DB.prepare('INSERT INTO admin_audit_log (admin_id, action, detail) VALUES (?, ?, ?)').bind(u.id, 'unblacklist_email', `Removed ${row.email} from blacklist`);
+  return c.json({ ok: true });
 });
 
 // ---------- AI (registered separately, shares env) ----------

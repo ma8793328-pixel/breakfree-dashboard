@@ -42,7 +42,6 @@ export default function AuthPage({ mode }) {
   const passwordOk = useMemo(() => PASSWORD_RULES.every((r) => r.test(password)), [password]);
   const passwordStrengthLevel = useMemo(() => passwordStrength(password), [password]);
   const formValid = isLogin ? emailValid && password.length > 0 : emailValid && passwordOk;
-  const shouldShowPasswordRules = !isLogin && touched.password && password.length > 0 && !passwordOk;
 
   async function onSubmit(e) {
     e.preventDefault();
@@ -129,7 +128,7 @@ export default function AuthPage({ mode }) {
             {isLogin && (
               <div className="auth-row" style={{ justifyContent: 'space-between', marginTop: 6 }}>
                 <label className="remember-row">
-                  <input type="checkbox" /> Remember me
+                  <input type="checkbox" checked={rememberMe} onChange={(e) => setRememberMe(e.target.checked)} /> Remember me
                 </label>
                 <Link to="/forgot-password" className="forgot-link">Forgot password?</Link>
               </div>

@@ -90,6 +90,12 @@ export default function AdminPage() {
   const [nudgeBusy, setNudgeBusy] = useState(false);
   const [nudgeTarget, setNudgeTarget] = useState('');
   const [metrics, setMetrics] = useState(null);
+  const [users, setUsers] = useState(null);
+  const [blacklist, setBlacklist] = useState(null);
+  const [userSearch, setUserSearch] = useState('');
+  const [blacklistEmail, setBlacklistEmail] = useState('');
+  const [blacklistReason, setBlacklistReason] = useState('');
+  const [adminBusy, setAdminBusy] = useState({});
 
   const loadStatus = useCallback(async () => {
     try {
@@ -145,6 +151,24 @@ export default function AdminPage() {
     }
   }, [token]);
 
+  const loadUsers = useCallback(async () => {
+    try {
+      const d = await api(`/admin/users${userSearch ? `?q=${encodeURIComponent(userSearch)}` : ''}`, { token });
+      setUsers(d.users);
+    } catch {
+      setUsers([]);
+    }
+  }, [token, userSearch]);
+
+  const loadBlacklist = useCallback(async () => {
+    try {
+      const d = await api('/admin/blacklist', { token });
+      setBlacklist(d.blacklist);
+    } catch {
+      setBlacklist([]);
+    }
+  }, [token]);
+
   useEffect(() => {
     loadStatus();
     loadErrors();
@@ -152,8 +176,10 @@ export default function AdminPage() {
     loadAuditLog();
     loadWebhooks();
     loadMetrics();
+    loadUsers();
+    loadBlacklist();
     runAiCheck();
-  }, [loadStatus, loadErrors, loadReports, loadAuditLog, loadWebhooks, loadMetrics]);
+  }, [loadStatus, loadErrors, loadReports, loadAuditLog, loadWebhooks, loadMetrics, loadUsers, loadBlacklist]);
 
   async function clearErrors() {
     if (!confirm('Clear errors older than 24 hours?')) return;
@@ -184,6 +210,99 @@ export default function AdminPage() {
       alert(e.message);
     } finally {
       setResolveBusy(null);
+    }
+  }
+
+  async function blockUser(userId) {
+    if (!confirm('Block this user site-wide and delete their account?')) return;
+    setAdminBusy((b) => ({ ...b, block: userId }));
+    try {
+      await api(`/admin/users/${userId}/block`, { method: 'POST', token });
+      await loadUsers();
+      await loadBlacklist();
+      await loadStatus();
+      await loadAuditLog();
+      alert('User blocked and deleted.');
+    } catch (e) {
+      alert(e.message);
+    } finally {
+      setAdminBusy((b) => ({ ...b, block: null }));
+    }
+  }
+
+  async function unblockUser(userId) {
+    setAdminBusy((b) => ({ ...b, unblock: userId }));
+    try {
+      await api(`/admin/users/${userId}/unblock`, { method: 'POST', token });
+      await loadUsers();
+      await loadBlacklist();
+      await loadAuditLog();
+      alert('User unblocked.');
+    } catch (e) {
+      alert(e.message);
+    } finally {
+      setAdminBusy((b) => ({ ...b, unblock: null }));
+    }
+  }
+
+  async function makeAdmin(userId) {
+    if (!confirm('Grant admin access to this user?')) return;
+    setAdminBusy((b) => ({ ...b, makeAdmin: userId }));
+    try {
+      await api(`/admin/users/${userId}/make-admin`, { method: 'POST', token });
+      await loadUsers();
+      await loadAuditLog();
+      alert('User is now an admin.');
+    } catch (e) {
+      alert(e.message);
+    } finally {
+      setAdminBusy((b) => ({ ...b, makeAdmin: null }));
+    }
+  }
+
+  async function removeAdmin(userId) {
+    if (!confirm('Remove admin access from this user? They will become a regular user.')) return;
+    setAdminBusy((b) => ({ ...b, removeAdmin: userId }));
+    try {
+      await api(`/admin/users/${userId}/remove-admin`, { method: 'POST', token });
+      await loadUsers();
+      await loadAuditLog();
+      alert('Admin access removed.');
+    } catch (e) {
+      alert(e.message);
+    } finally {
+      setAdminBusy((b) => ({ ...b, removeAdmin: null }));
+    }
+  }
+
+  async function addToBlacklist(e) {
+    e.preventDefault();
+    if (!blacklistEmail) return;
+    setAdminBusy((b) => ({ ...b, addBlacklist: true }));
+    try {
+      await api('/admin/blacklist', { method: 'POST', token, body: { email: blacklistEmail, reason: blacklistReason } });
+      setBlacklistEmail('');
+      setBlacklistReason('');
+      await loadBlacklist();
+      await loadAuditLog();
+      alert('Email added to blacklist.');
+    } catch (err) {
+      alert(err.message);
+    } finally {
+      setAdminBusy((b) => ({ ...b, addBlacklist: false }));
+    }
+  }
+
+  async function removeFromBlacklist(id) {
+    setAdminBusy((b) => ({ ...b, [`blacklist_${id}`]: true }));
+    try {
+      await api(`/admin/blacklist/${id}`, { method: 'DELETE', token });
+      await loadBlacklist();
+      await loadAuditLog();
+    } catch (e) {
+      alert(e.message);
+    } finally {
+      setAdminBusy((b) => ({ ...b, [`blacklist_${id}`]: false }));
     }
   }
 
@@ -648,6 +767,111 @@ export default function AdminPage() {
                     </div>
                   )}
                 </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+      <div className="card">
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+          <p className="card-title" style={{ margin: 0 }}>👥 User management</p>
+          <div className="row" style={{ gap: 8 }}>
+            <input
+              className="field"
+              style={{ margin: 0, padding: '6px 10px', fontSize: 13 }}
+              placeholder="Search by email..."
+              value={userSearch}
+              onChange={(e) => setUserSearch(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && loadUsers()}
+            />
+            <button className="btn btn-ghost btn-xs" onClick={loadUsers}>Search</button>
+          </div>
+        </div>
+        {users === null ? (
+          <div className="loading-screen" style={{ minHeight: '10vh' }}>
+            <div className="spinner" />
+          </div>
+        ) : users.length === 0 ? (
+          <p className="muted small">No users found.</p>
+        ) : (
+          <div className="list" style={{ gap: 6, maxHeight: 400, overflowY: 'auto' }}>
+            {users.map((u) => (
+              <div key={u.id} className="toggle-row" style={{ padding: '8px 0', alignItems: 'center' }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontWeight: 700, fontSize: 13 }}>
+                    {u.email}
+                    {u.role === 'admin' && <span className="badge-pill ok" style={{ marginLeft: 6, fontSize: 10 }}>ADMIN</span>}
+                  </div>
+                  <div className="meta">ID: {u.id} · Joined: {new Date(u.created_at + 'Z').toLocaleDateString()}</div>
+                </div>
+                <div className="row" style={{ gap: 4, flexShrink: 0 }}>
+                  {u.role !== 'admin' ? (
+                    <button className="btn btn-ghost btn-xs" onClick={() => makeAdmin(u.id)} disabled={adminBusy.makeAdmin === u.id}>
+                      {adminBusy.makeAdmin === u.id ? '...' : 'Make admin'}
+                    </button>
+                  ) : (
+                    <button className="btn btn-ghost btn-xs" onClick={() => removeAdmin(u.id)} disabled={adminBusy.removeAdmin === u.id}>
+                      {adminBusy.removeAdmin === u.id ? '...' : 'Remove admin'}
+                    </button>
+                  )}
+                  {u.role !== 'admin' && (
+                    <button className="btn btn-slip btn-xs" onClick={() => blockUser(u.id)} disabled={adminBusy.block === u.id}>
+                      {adminBusy.block === u.id ? '...' : 'Block'}
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="card">
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+          <p className="card-title" style={{ margin: 0 }}>🚫 Blacklist</p>
+        </div>
+        <p className="muted small" style={{ marginBottom: 10 }}>
+          Blacklisted emails cannot sign up or log in. Blocked users are also added here automatically.
+        </p>
+        <form onSubmit={addToBlacklist} className="row" style={{ flexWrap: 'wrap', gap: 8, marginBottom: 12 }}>
+          <input
+            className="field"
+            style={{ flex: 1, minWidth: 180, margin: 0 }}
+            placeholder="email@example.com"
+            value={blacklistEmail}
+            onChange={(e) => setBlacklistEmail(e.target.value)}
+            required
+          />
+          <input
+            className="field"
+            style={{ flex: 1, minWidth: 140, margin: 0 }}
+            placeholder="Reason (optional)"
+            value={blacklistReason}
+            onChange={(e) => setBlacklistReason(e.target.value)}
+          />
+          <button className="btn btn-slip btn-sm" type="submit" disabled={adminBusy.addBlacklist}>
+            {adminBusy.addBlacklist ? 'Adding...' : 'Add to blacklist'}
+          </button>
+        </form>
+        {blacklist === null ? (
+          <div className="loading-screen" style={{ minHeight: '10vh' }}>
+            <div className="spinner" />
+          </div>
+        ) : blacklist.length === 0 ? (
+          <p className="muted small">Blacklist is empty.</p>
+        ) : (
+          <div className="list" style={{ gap: 6 }}>
+            {blacklist.map((b) => (
+              <div key={b.id} className="toggle-row" style={{ padding: '6px 0' }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontWeight: 700, fontSize: 13 }}>{b.email}</div>
+                  <div className="meta">
+                    {b.reason || 'No reason'} · by {b.blocked_by_email || `admin #${b.blocked_by}`} · {new Date(b.created_at + 'Z').toLocaleString()}
+                  </div>
+                </div>
+                <button className="btn btn-ghost btn-xs" onClick={() => removeFromBlacklist(b.id)} disabled={adminBusy[`blacklist_${b.id}`]}>
+                  {adminBusy[`blacklist_${b.id}`] ? '...' : 'Remove'}
+                </button>
               </div>
             ))}
           </div>
