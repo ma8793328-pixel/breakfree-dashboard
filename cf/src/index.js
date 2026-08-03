@@ -139,6 +139,21 @@ function publicUser(u) {
   return { id: u.id, email: u.email, role: u.role };
 }
 
+// In-memory rate limiter: key → [timestamps]. Cleans up old entries on each call.
+const RATE_LIMITS = new Map();
+const RATE_WINDOW_MS = 60 * 1000;
+const RATE_MAX = 5;
+
+function rateLimit(key) {
+  const now = Date.now();
+  const entries = RATE_LIMITS.get(key) || [];
+  const recent = entries.filter((t) => now - t < RATE_WINDOW_MS);
+  if (recent.length >= RATE_MAX) return false;
+  recent.push(now);
+  RATE_LIMITS.set(key, recent);
+  return true;
+}
+
 function parseTriggerTimes(raw) {
   try {
     const arr = JSON.parse(raw || '[]');
@@ -155,12 +170,63 @@ function dateFromStr(date) {
 // ---------- health ----------
 app.get('/api/health', (c) => c.json({ ok: true, time: new Date().toISOString() }));
 
+// ---------- legal ----------
+const TERMS_TEXT = `BreakFree Terms of Service
+
+1. Acceptance of terms
+BreakFree is a personal habit and productivity tracking tool. By creating an account you agree to these terms.
+
+2. Eligible users
+You must be 13 or older to use this service. You are responsible for maintaining the confidentiality of your account.
+
+3. Acceptable use
+You may use this service for lawful personal purposes only. Do not attempt to abuse, interfere with or disrupt the service.
+
+4. Health disclaimer
+BreakFree is a companion, not a substitute for professional medical, mental health or addiction treatment. If you are in immediate danger call your local emergency number.
+
+5. Limitation of liability
+The service is provided "as is" without warranties. BreakFree is not liable for any indirect or consequential loss arising from your use of the service.
+
+6. Changes
+These terms may be updated from time to time. Continued use after changes means you accept the updated terms.`;
+
+const PRIVACY_TEXT = `BreakFree Privacy Policy
+
+1. What we collect
+We collect only the data necessary to run your account: email, hashed password, habit data, check-ins, journals, urges and basic usage metrics.
+
+2. How we use it
+Your data is used solely to provide the BreakFree service — habit tracking, coaching insights, reminders and reports.
+
+3. Data sharing
+We do not sell or share your personal information with third parties except where required by law or to operate the service (e.g. push notification providers).
+
+4. Security
+Data is stored securely and transmitted over HTTPS only. You can request a full export or permanent deletion of your account from Settings.
+
+5. Cookies and local storage
+The app uses local storage for offline drafts and UI preferences. No advertising cookies are used.
+
+6. Contact
+For privacy questions contact: privacy@breakfree.app`;
+
+app.get('/legal/terms', (c) => c.new Response(TERMS_TEXT, { headers: { 'Content-Type': 'text/plain; charset=utf-8' } }));
+app.get('/legal/privacy', (c) => c.new Response(PRIVACY_TEXT, { headers: { 'Content-Type': 'text/plain; charset=utf-8' } }));
+app.get('/terms', (c) => c.redirect('/legal/terms'));
+app.get('/privacy', (c) => c.redirect('/legal/privacy'));
+
 // ---------- auth ----------
 app.post('/api/auth/signup', async (c) => {
+  const ip = c.req.raw.headers.get('CF-Connecting-IP') || 'unknown';
+  if (!rateLimit(`signup:${ip}`)) return c.json({ error: 'Too many attempts. Please wait a minute and try again.' }, 429);
   const { email, password } = await c.req.json().catch(() => ({}));
   if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return c.json({ error: 'Please enter a valid email address.' }, 400);
-  if (!password || password.length < 6) return c.json({ error: 'Password must be at least 6 characters.' }, 400);
-  const em = String(email).toLowerCase();
+  if (!password || password.length < 8) return c.json({ error: 'Password must be at least 8 characters.' }, 400);
+  if (!/[A-Z]/.test(password)) return c.json({ error: 'Password must include at least one uppercase letter.' }, 400);
+  if (!/[0-9]/.test(password)) return c.json({ error: 'Password must include at least one number.' }, 400);
+  if (!/[^A-Za-z0-9]/.test(password)) return c.json({ error: 'Password must include at least one symbol (!@#$%^&*).' }, 400);
+  const em = String(email).toLowerCase().trim();
   const existing = await c.env.DB.prepare('SELECT id FROM users WHERE email = ?').bind(em).first();
   if (existing) return c.json({ error: 'An account with that email already exists.' }, 409);
   const hash = await hashPassword(password);
@@ -185,10 +251,12 @@ app.post('/api/auth/signup', async (c) => {
 });
 
 app.post('/api/auth/login', async (c) => {
+  const ip = c.req.raw.headers.get('CF-Connecting-IP') || 'unknown';
+  if (!rateLimit(`login:${ip}`)) return c.json({ error: 'Too many attempts. Please wait a minute and try again.' }, 429);
   const { email, password } = await c.req.json().catch(() => ({}));
   if (!email || !password) return c.json({ error: 'Email and password are required.' }, 400);
   const user = await c.env.DB.prepare('SELECT * FROM users WHERE email = ?').bind(String(email).toLowerCase()).first();
-  if (!user || !(await verifyPassword(password, user.password_hash))) return c.json({ error: 'Incorrect email or password.' }, 401);
+  if (!user || !(await verifyPassword(password, user.password_hash))) return c.json({ error: 'Invalid email or password.' }, 401);
   const token = await signToken(user, c.env.JWT_SECRET);
   return c.json({ token, user: publicUser(user) });
 });

@@ -19,6 +19,7 @@ import AdminPage from './pages/AdminPage.jsx';
 import SettingsPage from './pages/SettingsPage.jsx';
 import LandingPage from './pages/LandingPage.jsx';
 import HealthPage from './pages/HealthPage.jsx';
+import LegalPage from './pages/LegalPage.jsx';
 
 function RequireAuth() {
   const { user, loading } = useAuth();
@@ -76,6 +77,8 @@ export default function App() {
                 <Route path="/" element={<LandingPage />} />
                 <Route path="/login" element={<AuthPage mode="login" />} />
                 <Route path="/signup" element={<AuthPage mode="signup" />} />
+                <Route path="/terms" element={<LegalPage kind="terms" />} />
+                <Route path="/privacy" element={<LegalPage kind="privacy" />} />
               </Route>
               <Route element={<RequireAuth />}>
                 <Route path="/onboarding" element={<Onboarding />} />
