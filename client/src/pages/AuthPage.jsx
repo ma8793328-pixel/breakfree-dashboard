@@ -156,13 +156,15 @@ export default function AuthPage({ mode }) {
             </>
           )}
         </p>
-        <p className="center muted tiny mt" style={{ padding: '0 8px' }}>
-          <Link to="/terms" className="legal-link">Terms of Service</Link>
-          <span className="legal-sep">·</span>
-          <Link to="/privacy" className="legal-link">Privacy Policy</Link>
-          <br />
-          © 2026 BreakFree. All rights reserved.
-        </p>
+          <p className="center muted tiny mt" style={{ padding: '0 8px' }}>
+            <Link to="/terms" className="legal-link">Terms of Service</Link>
+            <span className="legal-sep">·</span>
+            <Link to="/privacy" className="legal-link">Privacy Policy</Link>
+            <br />
+            <a href="mailto:support@breakfree.app" className="legal-link">support@breakfree.app</a>
+            <span className="legal-sep">·</span>
+            © 2026 BreakFree. All rights reserved.
+          </p>
       </div>
     </div>
   );

@@ -239,6 +239,8 @@ export default function LandingPage() {
       <footer className="landing-footer">
         <span className="landing-footer-brand">🔥 BreakFree</span>
         <span className="muted small">Built to get you through the wall.</span>
+        <br />
+        <a href="mailto:support@breakfree.app" className="legal-link">support@breakfree.app</a>
       </footer>
     </div>
   );
