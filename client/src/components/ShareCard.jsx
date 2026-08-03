@@ -42,7 +42,10 @@ export default function ShareCard({ habitId, habitName, days, moneySaved, onClos
       <div className="panel" onClick={(e) => e.stopPropagation()}>
         <div className="share-card" style={{ '--tier': meta.tier }}>
           <div className="share-card-head">
-            <span className="share-card-logo">🔥 BreakFree</span>
+            <span className="share-card-logo">
+              <img src="/logo.png" alt="BreakFree" style={{ width: 20, height: 20, verticalAlign: 'middle', marginRight: 4 }} />
+              BreakFree
+            </span>
             <span className="share-card-badge">{meta.icon}</span>
           </div>
           <div className="share-card-days">

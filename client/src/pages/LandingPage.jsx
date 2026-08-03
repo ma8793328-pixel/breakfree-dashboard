@@ -93,7 +93,7 @@ export default function LandingPage() {
     <div className="landing">
       <header className="landing-nav">
         <div className="landing-logo">
-          <span className="logo-badge">🔥</span>
+          <img src="/logo.png" alt="BreakFree" className="logo-badge" />
           <span className="logo-text">BreakFree</span>
         </div>
         <nav className="landing-links" aria-label="Main">
@@ -237,7 +237,10 @@ export default function LandingPage() {
       </section>
 
       <footer className="landing-footer">
-        <span className="landing-footer-brand">🔥 BreakFree</span>
+        <span className="landing-footer-brand">
+          <img src="/logo.png" alt="BreakFree" style={{ width: 20, height: 20, verticalAlign: 'middle', marginRight: 6 }} />
+          BreakFree
+        </span>
         <span className="muted small">Built to get you through the wall.</span>
         <br />
         <a href="mailto:support@breakfree.app" className="legal-link">support@breakfree.app</a>

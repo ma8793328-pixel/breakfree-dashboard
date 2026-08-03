@@ -101,10 +101,10 @@ export default function Onboarding() {
   return (
     <div className="auth-wrap">
       <div className="auth-card">
-        <div className="logo-row">
-          <div className="logo-badge">🔥</div>
-          <span className="logo-text">BreakFree</span>
-        </div>
+          <div className="logo-row">
+            <img src="/logo.png" alt="BreakFree" className="logo-badge" />
+            <span className="logo-text">BreakFree</span>
+          </div>
 
         <div className="onboard-steps" aria-label="Progress">
           {[0, 1, 2].map((i) => (

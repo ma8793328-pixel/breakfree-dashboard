@@ -67,10 +67,10 @@ export default function AuthPage({ mode }) {
   return (
     <div className="auth-wrap">
       <div className="auth-card">
-        <div className="logo-row">
-          <div className="logo-badge">🔥</div>
-          <span className="logo-text">BreakFree</span>
-        </div>
+          <div className="logo-row">
+            <img src="/logo.png" alt="BreakFree" className="logo-badge" />
+            <span className="logo-text">BreakFree</span>
+          </div>
         <p className="tagline">
           {isLogin ? 'Welcome back. Today is another day you can own.' : 'A warm, grounded companion for breaking any habit — one day at a time.'}
         </p>

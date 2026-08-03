@@ -75,7 +75,7 @@ export default function ResetPasswordPage() {
       <div className="auth-wrap">
         <div className="auth-card">
           <div className="logo-row">
-            <div className="logo-badge">🔥</div>
+            <img src="/logo.png" alt="BreakFree" className="logo-badge" />
             <span className="logo-text">BreakFree</span>
           </div>
           <h1 className="page-title" style={{ marginTop: 4 }}>Choose a new password</h1>
