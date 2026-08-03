@@ -55,10 +55,29 @@ async function habitOf(env, habitId, userId) {
   return env.DB.prepare('SELECT * FROM habits WHERE id = ? AND user_id = ?').bind(Number(habitId), userId).first();
 }
 
+async function trackEvent(env, eventType, userId, habitId, variant, detail) {
+  try {
+    await env.DB.prepare('INSERT INTO app_events (event_type, user_id, habit_id, variant, detail) VALUES (?, ?, ?, ?, ?)')
+      .bind(eventType, userId || null, habitId || null, variant || null, detail || null).run();
+  } catch {
+    // never let analytics break the main flow
+  }
+}
+
+function weekStart(dateStr) {
+  const d = new Date(dateStr + 'T00:00:00');
+  const day = d.getUTCDay() || 7;
+  d.setUTCDate(d.getUTCDate() - day + 1);
+  d.setUTCHours(0, 0, 0, 0);
+  return dateKey(d);
+}
+
 async function habitPayload(env, habit) {
   const checkins = (await env.DB.prepare('SELECT date, status, forgiven FROM checkins WHERE habit_id = ?').bind(habit.id).all()).results;
   const stats = computeStats(checkins, habit.daily_cost, habit.daily_time, habit.units_per_day);
   const badges = (await env.DB.prepare('SELECT threshold, earned_date FROM badges WHERE habit_id = ? ORDER BY threshold').bind(habit.id).all()).results;
+  const ws = weekStart(todayKey());
+  const thisWeekJournal = await env.DB.prepare('SELECT count FROM journal_badges WHERE habit_id = ? AND week_start = ?').bind(habit.id, ws).first();
   return {
     id: habit.id,
     name: habit.name,
@@ -74,6 +93,8 @@ async function habitPayload(env, habit) {
     stats,
     wall: wallInfo(stats),
     badges,
+    journalWeekCount: thisWeekJournal?.count || 0,
+    journalWeekBadgeEarned: (thisWeekJournal?.count || 0) >= 3,
   };
 }
 
@@ -532,7 +553,15 @@ app.post('/api/habits/:id/journals', async (c) => {
   } catch (e) {
     console.error('FTS failed:', e.message);
   }
-  return c.json({ entry }, 201);
+  void trackEvent(c.env, 'journal_saved', u.id, habit.id, null, `entry length=${entry.content.length}`);
+  const ws = weekStart(key);
+  const existing = await c.env.DB.prepare('SELECT id, count FROM journal_badges WHERE habit_id = ? AND week_start = ?').bind(habit.id, ws).first();
+  const newCount = (existing?.count || 0) + 1;
+  await c.env.DB.prepare('INSERT INTO journal_badges (habit_id, week_start, count) VALUES (?, ?, ?) ON CONFLICT(habit_id, week_start) DO UPDATE SET count = excluded.count').bind(habit.id, ws, newCount).run();
+  if (newCount === 3 && !existing) {
+    void trackEvent(c.env, 'journal_badge_earned', u.id, habit.id, null, '3 entries in week');
+  }
+  return c.json({ entry, journalWeekCount: newCount }, 201);
 });
 
 // ---------- days out ----------
@@ -1089,11 +1118,13 @@ app.post('/api/push/subscribe', async (c) => {
   if (!u) return c.json({ error: 'Not authenticated' }, 401);
   const { endpoint, keys, timezone } = await c.req.json().catch(() => ({}));
   if (!endpoint || !keys?.p256dh || !keys?.auth) return c.json({ error: 'endpoint and keys are required.' }, 400);
+  const existingSub = await c.env.DB.prepare('SELECT id FROM push_subscriptions WHERE user_id = ?').bind(u.id).first();
   await c.env.DB.prepare(
     `INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth, last_seen) VALUES (?, ?, ?, ?, datetime('now'))
      ON CONFLICT(endpoint) DO UPDATE SET user_id = excluded.user_id, p256dh = excluded.p256dh, auth = excluded.auth, last_seen = datetime('now')`
   ).bind(u.id, String(endpoint), String(keys.p256dh), String(keys.auth)).run();
   if (timezone) await c.env.DB.prepare('UPDATE users SET timezone = ? WHERE id = ?').bind(String(timezone).slice(0, 64), u.id).run();
+  void trackEvent(c.env, existingSub ? 'push_resubscribed' : 'push_subscribed', u.id, null, null, existingSub ? 'user re-subscribed' : 'first subscription');
   return c.json({ ok: true });
 });
 
@@ -1517,6 +1548,30 @@ app.delete('/api/admin/webhooks/:id', async (c) => {
   return c.json({ ok: true });
 });
 
+app.get('/api/admin/metrics', async (c) => {
+  const u = userOf(c);
+  if (!u) return c.json({ error: 'Not authenticated' }, 401);
+  if (u.role !== 'admin') return c.json({ error: 'Admin access required.' }, 403);
+  const since = c.req.query('since') || '7 days ago';
+  const pushShown = Number((await c.env.DB.prepare("SELECT COUNT(*) AS n FROM app_events WHERE event_type = 'push_prompt_shown' AND created_at > datetime(?, 'localtime')").bind(since).first())?.n || 0);
+  const pushDismissed = Number((await c.env.DB.prepare("SELECT COUNT(*) AS n FROM app_events WHERE event_type = 'push_prompt_dismissed' AND created_at > datetime(?, 'localtime')").bind(since).first())?.n || 0);
+  const pushEnabled = Number((await c.env.DB.prepare("SELECT COUNT(*) AS n FROM app_events WHERE event_type = 'push_prompt_enabled' AND created_at > datetime(?, 'localtime')").bind(since).first())?.n || 0);
+  const journalShown = Number((await c.env.DB.prepare("SELECT COUNT(*) AS n FROM app_events WHERE event_type = 'journal_prompt_shown' AND created_at > datetime(?, 'localtime')").bind(since).first())?.n || 0);
+  const journalClicked = Number((await c.env.DB.prepare("SELECT COUNT(*) AS n FROM app_events WHERE event_type = 'journal_prompt_clicked' AND created_at > datetime(?, 'localtime')").bind(since).first())?.n || 0);
+  const journalBadges = Number((await c.env.DB.prepare("SELECT COUNT(*) AS n FROM journal_badges WHERE earned_date > datetime(?, 'localtime')").bind(since).first())?.n || 0);
+  const variantCounts = (await c.env.DB.prepare(`SELECT variant, COUNT(*) AS n FROM app_events WHERE event_type IN ('push_prompt_shown','push_prompt_dismissed','push_prompt_enabled') AND created_at > datetime(?, 'localtime') GROUP BY variant`).bind(since).all()).results;
+  const variants = {};
+  for (const v of variantCounts) { if (v.variant) variants[v.variant] = Number(v.n || 0); }
+  const totalSubs = Number((await c.env.DB.prepare('SELECT COUNT(*) AS n FROM push_subscriptions').first())?.n || 0);
+  return c.json({
+    since,
+    push: { shown: pushShown, dismissed: pushDismissed, enabled: pushEnabled, optInRate: pushShown > 0 ? Math.round((pushEnabled / pushShown) * 100) : 0 },
+    journal: { shown: journalShown, clicked: journalClicked, conversionRate: journalShown > 0 ? Math.round((journalClicked / journalShown) * 100) : 0, badgesEarned: journalBadges },
+    totalPushSubs: totalSubs,
+    abTest: variants,
+  });
+});
+
 async function sendWebhookAlert(env, event, payload) {
   try {
     const rows = (await env.DB.prepare('SELECT id, url, events FROM admin_webhooks WHERE active = 1').all()).results;
@@ -1538,6 +1593,33 @@ async function sendWebhookAlert(env, event, payload) {
     // ignore webhook dispatch errors
   }
 }
+
+app.post('/api/analytics/push', async (c) => {
+  try {
+    const u = userOf(c);
+    const body = await c.req.json().catch(() => ({}));
+    const event = (body.event || 'unknown').trim();
+    const variant = (body.variant || '').trim() || null;
+    if (u) await trackEvent(c.env, event, u.id, null, variant, null);
+    else await trackEvent(c.env, event, null, null, variant, 'anonymous');
+  } catch {
+    // never block the user on analytics failures
+  }
+  return c.json({ ok: true });
+});
+
+app.post('/api/analytics/engagement', async (c) => {
+  try {
+    const u = userOf(c);
+    const body = await c.req.json().catch(() => ({}));
+    const event = (body.event || 'unknown').trim();
+    if (u) await trackEvent(c.env, event, u.id, null, null, null);
+    else await trackEvent(c.env, event, null, null, null, 'anonymous');
+  } catch {
+    // never block the user on analytics failures
+  }
+  return c.json({ ok: true });
+});
 
 app.post('/api/admin/ai-check', async (c) => {
   const u = userOf(c);

@@ -89,6 +89,7 @@ export default function AdminPage() {
   const [showResolved, setShowResolved] = useState(false);
   const [nudgeBusy, setNudgeBusy] = useState(false);
   const [nudgeTarget, setNudgeTarget] = useState('');
+  const [metrics, setMetrics] = useState(null);
 
   const loadStatus = useCallback(async () => {
     try {
@@ -135,14 +136,24 @@ export default function AdminPage() {
     }
   }, [token]);
 
+  const loadMetrics = useCallback(async () => {
+    try {
+      const d = await api('/admin/metrics', { token });
+      setMetrics(d);
+    } catch {
+      setMetrics(null);
+    }
+  }, [token]);
+
   useEffect(() => {
     loadStatus();
     loadErrors();
     loadReports();
     loadAuditLog();
     loadWebhooks();
+    loadMetrics();
     runAiCheck();
-  }, [loadStatus, loadErrors, loadReports, loadAuditLog, loadWebhooks]);
+  }, [loadStatus, loadErrors, loadReports, loadAuditLog, loadWebhooks, loadMetrics]);
 
   async function clearErrors() {
     if (!confirm('Clear errors older than 24 hours?')) return;
@@ -329,6 +340,33 @@ export default function AdminPage() {
           <div className="ai-summary ok">
             📊 Journal correlation: {status.insights.journalCorrelation}
           </div>
+        </div>
+      )}
+
+      {metrics && (
+        <div className="card">
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+            <p className="card-title" style={{ margin: 0 }}>📈 Engagement funnels (last 7d)</p>
+            <button className="btn btn-ghost btn-xs" onClick={loadMetrics}>Refresh</button>
+          </div>
+          <div className="metric-grid" style={{ gridTemplateColumns: 'repeat(2, 1fr)' }}>
+            <StatCard label="Push prompt shown" value={metrics.push.shown} sub={`${metrics.push.optInRate}% opt-in rate`} />
+            <StatCard label="Push enabled" value={metrics.push.enabled} sub={`${metrics.push.dismissed} dismissed`} />
+            <StatCard label="Journal prompt shown" value={metrics.journal.shown} sub={`${metrics.journal.conversionRate}% clicked`} />
+            <StatCard label="Journal badges earned" value={metrics.journal.badgesEarned} sub="3 entries in a week" />
+          </div>
+          {metrics.abTest && Object.keys(metrics.abTest).length > 0 && (
+            <div style={{ marginTop: 10 }}>
+              <p className="muted small" style={{ marginBottom: 6 }}>A/B test — push prompt variants</p>
+              {Object.entries(metrics.abTest).map(([variant, count]) => (
+                <div key={variant} className="toggle-row" style={{ padding: '4px 0' }}>
+                  <span className="meta">{variant}</span>
+                  <strong>{count} events</strong>
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="meta" style={{ marginTop: 8 }}>Total push subscriptions: {metrics.totalPushSubs}</div>
         </div>
       )}
 

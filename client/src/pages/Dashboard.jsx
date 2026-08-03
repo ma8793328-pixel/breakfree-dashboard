@@ -67,7 +67,6 @@ export default function Dashboard() {
   const [recoveryBusy, setRecoveryBusy] = useState(false);
   const [overrideToday, setOverrideToday] = useState(false);
   const [lastJournal, setLastJournal] = useState(null);
-  const [journalWeekCount, setJournalWeekCount] = useState(0);
   const [todayUrgeCount, setTodayUrgeCount] = useState(0);
   const [urgePeak, setUrgePeak] = useState(null);
   const [totalUrges, setTotalUrges] = useState(0);
@@ -87,6 +86,15 @@ export default function Dashboard() {
   const [pushOptInDismissed, setPushOptInDismissed] = useState(() => {
     try { return localStorage.getItem('bf_push_optin_dismissed') === '1'; } catch { return false; }
   });
+  const pushVariant = (() => {
+    try {
+      const stored = localStorage.getItem('bf_push_variant');
+      if (stored === 'urgency' || stored === 'benefit') return stored;
+      const v = Math.random() < 0.5 ? 'urgency' : 'benefit';
+      localStorage.setItem('bf_push_variant', v);
+      return v;
+    } catch { return 'urgency'; }
+  })();
 
   useEffect(() => {
     const loc = window.location;
@@ -185,6 +193,12 @@ export default function Dashboard() {
   useEffect(() => {
     if (!active || !token) return;
     let cancelled = false;
+    if (pushSupported && pushStatus !== 'granted' && !pushOptInDismissed) {
+      api('/analytics/push', { method: 'POST', body: { event: 'push_prompt_shown', variant: pushVariant } }).catch(() => {});
+    }
+    if (active.journalWeekCount != null && active.journalWeekCount < 3 && streak >= 3) {
+      api('/analytics/engagement', { method: 'POST', body: { event: 'journal_prompt_shown' } }).catch(() => {});
+    }
     api(`/habits/${active.id}/journals`, { token })
       .then((data) => {
         if (!cancelled) {
@@ -436,15 +450,21 @@ export default function Dashboard() {
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
             <span style={{ fontSize: 28 }}>🔔</span>
             <div style={{ flex: 1 }}>
-              <p style={{ fontWeight: 700, margin: 0, fontSize: 15 }}>Stay on track with nudges</p>
+              <p style={{ fontWeight: 700, margin: 0, fontSize: 15 }}>
+                {pushVariant === 'urgency'
+                  ? 'Don\'t miss your nudge window'
+                  : 'Stay on track with gentle nudges'}
+              </p>
               <p className="muted small" style={{ marginTop: 2 }}>
-                Enable notifications to get gentle reminders during your trigger windows and milestone celebrations.
+                {pushVariant === 'urgency'
+                  ? 'Your trigger window is coming up. Enable notifications so we can reach you in time.'
+                  : 'Enable notifications to get reminders during your trigger windows and milestone celebrations.'}
               </p>
             </div>
-            <button className="btn btn-ghost btn-sm" onClick={async () => { const ok = await subscribe?.(); if (ok) setPushOptInDismissed(true); }}>
+            <button className="btn btn-ghost btn-sm" onClick={async () => { const ok = await subscribe?.(); if (ok) { setPushOptInDismissed(true); try { localStorage.setItem('bf_push_optin_dismissed', '1'); } catch {} api('/analytics/push', { method: 'POST', body: { event: 'push_prompt_enabled', variant: pushVariant } }).catch(() => {}); } }}>
               Enable
             </button>
-            <button className="btn btn-ghost btn-sm" onClick={() => { setPushOptInDismissed(true); try { localStorage.setItem('bf_push_optin_dismissed', '1'); } catch {} }} style={{ color: 'var(--muted-2)' }}>
+            <button className="btn btn-ghost btn-sm" onClick={() => { setPushOptInDismissed(true); try { localStorage.setItem('bf_push_optin_dismissed', '1'); api('/analytics/push', { method: 'POST', body: { event: 'push_prompt_dismissed', variant: pushVariant } }).catch(() => {}); } catch {} }} style={{ color: 'var(--muted-2)' }}>
               Later
             </button>
           </div>
@@ -898,19 +918,19 @@ export default function Dashboard() {
         </button>
       </div>
 
-      {journalWeekCount < 3 && streak >= 3 && (
+      {active.journalWeekCount != null && active.journalWeekCount < 3 && streak >= 3 && (
         <div className="card" style={{ borderColor: 'rgba(168,192,154,0.35)' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
             <span style={{ fontSize: 28 }}>📝</span>
             <div style={{ flex: 1 }}>
               <p style={{ fontWeight: 700, margin: 0, fontSize: 15 }}>Journal 3× this week</p>
               <p className="muted small" style={{ marginTop: 2 }}>
-                {journalWeekCount === 0
+                {(active.journalWeekCount || 0) === 0
                   ? 'No journal entries yet this week. Writing for 2 minutes helps you spot patterns and stay grounded.'
-                  : `${journalWeekCount} this week — one more and you hit your goal.`}
+                  : `${active.journalWeekCount} this week — one more and you hit your goal.`}
               </p>
             </div>
-            <button className="btn btn-ghost btn-sm" onClick={() => navigate('/app/journal')}>
+            <button className="btn btn-ghost btn-sm" onClick={() => { navigate('/app/journal'); api('/analytics/engagement', { method: 'POST', body: { event: 'journal_prompt_clicked' } }).catch(() => {}); }}>
               Write now
             </button>
           </div>
@@ -945,6 +965,12 @@ export default function Dashboard() {
               earned={earnedBadges.some((b) => b.threshold === m.days)}
             />
           ))}
+          {active.journalWeekBadgeEarned && (
+            <div className="badge earned" style={{ '--tier': '#A8C09A' }} title="Journal 3× this week">
+              <div className="medal" style={{ fontSize: 20 }}>📝</div>
+              <div className="days">Reflector</div>
+            </div>
+          )}
         </div>
       </div>
 
