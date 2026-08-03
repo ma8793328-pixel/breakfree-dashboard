@@ -65,7 +65,9 @@ function RatingRow({ label, value, onChange, accentColor, lowEnd = 'Low', highEn
                 boxShadow: value >= score ? `0 0 10px ${accentColor}40` : undefined
               }}
               onClick={() => onChange(score)}
-            />
+            >
+              {score}
+            </button>
           ))}
         </div>
         <span className="scale-label">{highEnd}</span>
