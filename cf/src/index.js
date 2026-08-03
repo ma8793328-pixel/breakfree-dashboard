@@ -1321,8 +1321,16 @@ app.get('/api/admin/status', async (c) => {
   const communityPosts = Number((await c.env.DB.prepare('SELECT COUNT(*) AS n FROM community_posts').first())?.n || 0);
   const communityComments = Number((await c.env.DB.prepare('SELECT COUNT(*) AS n FROM community_comments').first())?.n || 0);
   const openReports = Number((await c.env.DB.prepare("SELECT COUNT(*) AS n FROM community_reports WHERE status = 'open'").first())?.n || 0);
+  const resolvedReports = Number((await c.env.DB.prepare("SELECT COUNT(*) AS n FROM community_reports WHERE status = 'resolved'").first())?.n || 0);
   if (openReports > 0) {
     void sendWebhookAlert(c.env, 'open_reports', { count: openReports });
+  }
+  const errorTrend = [];
+  for (let i = 6; i >= 0; i--) {
+    const d = addDays(todayKey(), -i);
+    const dayLabel = new Date(d + 'T00:00:00').toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+    const count = Number((await c.env.DB.prepare('SELECT COUNT(*) AS n FROM app_errors WHERE date(created_at) = ?').bind(d).first())?.n || 0);
+    errorTrend.push({ date: d, label: dayLabel, count });
   }
   const notifications = {
     lastRun: metaRows.nudges_last_run || null,
@@ -1342,13 +1350,14 @@ app.get('/api/admin/status', async (c) => {
     errors24h: Number(errors24h || 0),
     notifications,
     today: { checkins: todayCheckins, urges: todayUrges },
-    community: { posts: communityPosts, comments: communityComments, openReports },
+    community: { posts: communityPosts, comments: communityComments, openReports, resolvedReports },
     server: { healthy: serverHealthy, status: serverHealthy ? 'healthy' : 'degraded' },
     insights: {
       streakRisk: streakRiskUsers.length > 0 ? streakRiskUsers : null,
       streakRiskCount: streakRiskUsers.length,
       journalCorrelation,
     },
+    errorTrend,
   });
 });
 

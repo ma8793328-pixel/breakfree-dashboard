@@ -1332,6 +1332,13 @@ a {
   color: var(--slip);
 }
 
+.trend-day-label {
+  font-size: 9px;
+  font-weight: 700;
+  fill: var(--muted-2);
+  font-family: var(--font-head);
+}
+
 /* ---------- AI insight cards ---------- */
 
 .insight-card {

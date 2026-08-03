@@ -28,10 +28,13 @@ function HealthDot({ status }) {
   );
 }
 
-function StatCard({ label, value, sub, accent }) {
+function StatCard({ label, value, sub, accent, hint }) {
   return (
     <div className="metric" style={{ borderColor: accent || 'var(--border)' }}>
-      <div className="value" style={{ color: accent || 'var(--cream)' }}>{value}</div>
+      <div className="value" style={{ color: accent || 'var(--cream)' }}>
+        {value}
+        {hint && <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-2)', marginLeft: 6 }}>{hint}</span>}
+      </div>
       <div className="label">{label}</div>
       {sub && <div className="meta" style={{ marginTop: 2 }}>{sub}</div>}
     </div>
@@ -40,6 +43,32 @@ function StatCard({ label, value, sub, accent }) {
 
 function SectionTitle({ children }) {
   return <p className="card-title" style={{ marginBottom: 12 }}>{children}</p>;
+}
+
+function ErrorTrendChart({ trend }) {
+  if (!trend || !trend.length) return null;
+  const max = Math.max(1, ...trend.map((t) => t.count));
+  const barW = 100 / trend.length;
+  return (
+    <div style={{ marginTop: 12 }}>
+      <p className="muted small" style={{ marginBottom: 6 }}>Last 7 days</p>
+      <svg viewBox="0 0 420 80" style={{ width: '100%', height: 'auto' }} aria-label="Error count per day for the last 7 days">
+        {trend.map((t, i) => {
+          const h = Math.max(2, (t.count / max) * 60);
+          const x = i * barW + barW * 0.15;
+          const w = barW * 0.7;
+          const fill = t.count === 0 ? 'var(--border)' : t.count > 3 ? 'var(--slip)' : 'var(--accent)';
+          return (
+            <g key={t.date}>
+              <rect x={x} y={70 - h} width={w} height={h} rx={3} fill={fill} opacity={0.85} />
+              <text x={x + w / 2} y={78} textAnchor="middle" className="trend-day-label">{t.label.split(' ')[0]}</text>
+              {t.count > 0 && <text x={x + w / 2} y={68 - h} textAnchor="middle" style={{ fontSize: 10, fontWeight: 700, fill: 'var(--cream)' }}>{t.count}</text>}
+            </g>
+          );
+        })}
+      </svg>
+    </div>
+  );
 }
 
 export default function AdminPage() {
@@ -57,6 +86,7 @@ export default function AdminPage() {
   const [webhooks, setWebhooks] = useState(null);
   const [webhookForm, setWebhookForm] = useState({ url: '', label: '', events: 'server_degraded,open_reports' });
   const [webhookBusy, setWebhookBusy] = useState(false);
+  const [showResolved, setShowResolved] = useState(false);
 
   const loadStatus = useCallback(async () => {
     try {
@@ -109,6 +139,7 @@ export default function AdminPage() {
     loadReports();
     loadAuditLog();
     loadWebhooks();
+    runAiCheck();
   }, [loadStatus, loadErrors, loadReports, loadAuditLog, loadWebhooks]);
 
   async function clearErrors() {
@@ -211,8 +242,11 @@ export default function AdminPage() {
     : [];
 
   const openReportsList = reports?.filter((r) => r.status === 'open') || [];
+  const resolvedReportsList = reports?.filter((r) => r.status === 'resolved') || [];
   const errorGroups = errors?.groups || [];
   const errorEntries = errors?.errors || [];
+  const uptimeMins = status ? Math.floor(status.uptime / 60) : 0;
+  const uptimeDisplay = uptimeMins >= 60 ? `${Math.floor(uptimeMins / 60)}h ${uptimeMins % 60}m` : `${uptimeMins}m`;
 
   return (
     <Layout>
@@ -236,15 +270,28 @@ export default function AdminPage() {
             <span className="meta">{new Date(status.startedAt).toLocaleString()}</span>
           </div>
           <div className="metric-grid" style={{ gridTemplateColumns: 'repeat(3, 1fr)' }}>
-            <StatCard label="Uptime" value={`${Math.floor(status.uptime / 60)}m`} />
+            <StatCard label="Uptime" value={uptimeDisplay} sub="since last deploy" />
             <StatCard label="Total users" value={status.counts.users} sub={`${status.premiumUsers} premium`} />
             <StatCard label="Errors (24h)" value={status.errors24h} accent={status.errors24h > 0 ? 'var(--slip)' : undefined} />
             <StatCard label="Check-ins today" value={status.today?.checkins || 0} accent="var(--sage)" />
             <StatCard label="Urges logged today" value={status.today?.urges || 0} accent="var(--accent-strong)" />
             <StatCard label="Open reports" value={status.community?.openReports || 0} accent={status.community?.openReports > 0 ? 'var(--slip)' : 'var(--sage)'} />
           </div>
-          <div className="meta" style={{ marginTop: 10 }}>
-            {status.counts.habits} habits · {status.counts.checkins} check-ins · {status.counts.urges} urges · {status.counts.journals} journals
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16, marginTop: 10 }}>
+            <div className="meta" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              🔔 Push subscriptions: <strong>{status.notifications?.subs || 0}</strong>
+              {(status.notifications?.subs || 0) === 0 && <span style={{ color: 'var(--accent)', cursor: 'pointer', textDecoration: 'underline' }} onClick={() => navigate('/app/settings')}>How to enable →</span>}
+            </div>
+            <div className="meta" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              📊 Total nudges sent: <strong>{status.notifications?.sentTotal || 0}</strong>
+              {(status.notifications?.sentTotal || 0) === 0 && <span title="Nudges require push subscriptions. Ask users to enable notifications in Settings.">ℹ️</span>}
+            </div>
+            <div className="meta" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              📝 Journals: <strong>{status.counts.journals}</strong> total · <span title="Users can journal from the Journal tab">ℹ️</span>
+            </div>
+            <div className="meta">
+              {status.counts.habits} habits · {status.counts.checkins} check-ins · {status.counts.urges} urges
+            </div>
           </div>
         </div>
       )}
@@ -275,7 +322,7 @@ export default function AdminPage() {
           <div className={`ai-summary ${status.notifications.healthy ? 'ok' : 'bad'}`}>
             {status.notifications.healthy
               ? '✅ Cron is firing — nudges flowing'
-              : '⚠️ No scheduled nudges in the last ~27h'}
+              : '⚠️ No scheduled nudges in the last ~27h (free plan limitation: cron may not fire)'}
           </div>
           <div className="list" style={{ gap: 6, marginTop: 10 }}>
             <div className="toggle-row" style={{ padding: '6px 0' }}>
@@ -410,6 +457,7 @@ export default function AdminPage() {
           <p className="muted small">No errors logged.</p>
         ) : (
           <>
+            <ErrorTrendChart trend={status?.errorTrend} />
             <div className="list" style={{ gap: 6, marginBottom: 12 }}>
               {errorGroups.slice(0, 10).map((g, i) => (
                 <div key={i} className="ai-check">
@@ -482,36 +530,40 @@ export default function AdminPage() {
       </div>
 
       <div className="card">
-        <p className="card-title">🛡️ Community moderation</p>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+          <p className="card-title" style={{ margin: 0 }}>🛡️ Community moderation</p>
+          <div className="row" style={{ gap: 8 }}>
+            <button className="btn btn-ghost btn-xs" onClick={() => setShowResolved((v) => !v)}>
+              {showResolved ? 'Hide resolved' : `View history (${resolvedReportsList.length})`}
+            </button>
+          </div>
+        </div>
         {reports === null ? (
           <div className="loading-screen" style={{ minHeight: '15vh' }}>
             <div className="spinner" />
           </div>
-        ) : openReportsList.length === 0 ? (
+        ) : openReportsList.length === 0 && !showResolved ? (
           <p className="muted small">No open reports. The community is behaving itself. ✨</p>
         ) : (
-          <>
-            <p className="muted small" style={{ marginBottom: 10 }}>
-              {openReportsList.length} open report{openReportsList.length === 1 ? '' : 's'} — resolve them below or open the full moderation tool.
-            </p>
-            <div className="list" style={{ gap: 10 }}>
-              {openReportsList.map((r) => (
-                <div key={r.id} className="ai-check">
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontWeight: 700, fontSize: 14 }}>
-                      <span className="badge-pill no">{r.status.toUpperCase()}</span>{' '}
-                      {r.reason} · by {r.reporter}
+          <div className="list" style={{ gap: 10 }}>
+            {(showResolved ? [...openReportsList, ...resolvedReportsList] : openReportsList).map((r) => (
+              <div key={r.id} className="ai-check">
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontWeight: 700, fontSize: 14 }}>
+                    <span className={`badge-pill ${r.status === 'open' ? 'no' : 'ok'}`}>{r.status.toUpperCase()}</span>{' '}
+                    {r.reason} · by {r.reporter}
+                  </div>
+                  <div className="meta">
+                    {r.post_id ? `post #${r.post_id}` : `comment #${r.comment_id}`} by {r.author || 'Anonymous'} ·{' '}
+                    {new Date(r.created_at + 'Z').toLocaleString()}
+                  </div>
+                  {(r.post_content || r.comment_content) && (
+                    <div className="meta" style={{ marginTop: 4, whiteSpace: 'pre-wrap' }}>
+                      "{(r.post_content || r.comment_content).slice(0, 160)}
+                      {(r.post_content || r.comment_content).length > 160 ? '…' : ''}"
                     </div>
-                    <div className="meta">
-                      {r.post_id ? `post #${r.post_id}` : `comment #${r.comment_id}`} by {r.author || 'Anonymous'} ·{' '}
-                      {new Date(r.created_at + 'Z').toLocaleString()}
-                    </div>
-                    {(r.post_content || r.comment_content) && (
-                      <div className="meta" style={{ marginTop: 4, whiteSpace: 'pre-wrap' }}>
-                        "{(r.post_content || r.comment_content).slice(0, 160)}
-                        {(r.post_content || r.comment_content).length > 160 ? '…' : ''}"
-                      </div>
-                    )}
+                  )}
+                  {r.status === 'open' && (
                     <div className="row mt" style={{ gap: 8, flexWrap: 'wrap' }}>
                       <button className="btn btn-ghost btn-sm" onClick={() => resolveReport(r.id, 'dismiss')} disabled={resolveBusy === r.id}>
                         {resolveBusy === r.id ? '…' : 'Dismiss'}
@@ -523,11 +575,11 @@ export default function AdminPage() {
                         {resolveBusy === r.id ? '…' : 'Block user'}
                       </button>
                     </div>
-                  </div>
+                  )}
                 </div>
-              ))}
-            </div>
-          </>
+              </div>
+            ))}
+          </div>
         )}
       </div>
     </Layout>
