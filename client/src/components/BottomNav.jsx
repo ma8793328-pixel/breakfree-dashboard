@@ -77,9 +77,23 @@ const TABS = [
   { to: '/app/community', label: 'Community', icon: 'community', end: false },
 ];
 
+function QuickExitButton() {
+  return (
+    <button className="quick-exit-btn" onClick={() => { window.location.replace('https://www.google.com'); }} aria-label="Quick exit">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+        <polyline points="16 17 21 12 16 7" />
+        <line x1="21" y1="12" x2="9" y2="12" />
+      </svg>
+      <span>Exit</span>
+    </button>
+  );
+}
+
 export default function BottomNav() {
   return (
     <nav className="bottom-nav">
+      <QuickExitButton />
       {TABS.map((t) => (
         <NavLink key={t.to} to={t.to} end={t.end} className={({ isActive }) => (isActive ? 'active' : '')}>
           <Icon name={t.icon} />

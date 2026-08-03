@@ -81,6 +81,10 @@ export default function Dashboard() {
   const { supported: pushSupported, status: pushStatus, error: pushError, subscribe } = usePushNotifications(token);
   const navigate = useNavigate();
 
+  const quickExit = () => {
+    window.location.replace('https://www.google.com');
+  };
+
   const [flow, setFlow] = useState(null);
   const [slipNote, setSlipNote] = useState('');
   const [slipTrigger, setSlipTrigger] = useState('');
@@ -546,6 +550,9 @@ export default function Dashboard() {
                     </button>
                   )}
                   <div className="divider" />
+                  <button className="menu-item menu-item-exit" onClick={quickExit}>
+                    ⚡ Quick exit
+                  </button>
                   <button className="menu-item" onClick={logout}>
                     🚪 Log out
                   </button>
