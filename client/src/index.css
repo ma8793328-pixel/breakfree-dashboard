@@ -1348,18 +1348,81 @@ a {
 
 /* ---------- Daily wellness check-in ---------- */
 
-.wellness-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 14px;
+.rating-row {
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 16px;
+  padding: 16px 14px;
+  margin: 12px 0;
+  transition: background 0.2s ease;
 }
 
-.wellness-actions {
+.rating-row:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.rating-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.rating-label {
+  font-size: 18px;
+  font-weight: 600;
+  color: #f5f5f5;
+}
+
+.rating-value {
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.rating-controls {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.scale-label {
+  font-size: 13px;
+  color: #888;
+  min-width: 32px;
+}
+
+.rating-buttons {
+  display: flex;
+  gap: 12px;
+  flex: 1;
+  justify-content: center;
+}
+
+.rating-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 2px solid #3a3a3a;
+  background: transparent;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  position: relative;
+}
+
+.rating-btn:active {
+  transform: scale(0.9);
+}
+
+.rating-btn.active {
+  border-color: transparent;
+}
+
+.rating-feedback {
+  display: block;
+  text-align: center;
+  font-size: 14px;
+  font-weight: 500;
+  margin-top: 4px;
 }
 
 .wellness-row {

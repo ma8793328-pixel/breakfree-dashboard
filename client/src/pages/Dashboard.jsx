@@ -14,11 +14,20 @@ import Badge from '../components/Badge.jsx';
 import { usePushNotifications, scheduleTriggerNudges } from '../usePushNotifications.js';
 import { queueOffline, flushOfflineQueue } from '../offline.js';
 
-function ScalePicker({ label, value, onChange, lowEnd = 'Low', highEnd = 'High' }) {
+function RatingRow({ label, value, onChange, accentColor, lowEnd = 'Low', highEnd = 'High' }) {
   const ids = [1, 2, 3, 4, 5];
+  const getFeedback = () => {
+    const tips = {
+      Energy: ["Low energy", "Warming up", "Steady", "Energised", "Full power"],
+      Sleep: ["Poor rest", "Tired", "Okay rest", "Good sleep", "Great rest!"],
+      Mood: ["Low", "Flat", "Neutral", "Positive", "Feeling great!"]
+    };
+    return tips[label]?.[value - 1] || '';
+  };
+
   return (
     <div
-      className="scale-chips"
+      className="rating-row"
       role="radiogroup"
       aria-label={`${label}, from ${lowEnd} to ${highEnd}`}
       onKeyDown={(e) => {
@@ -34,20 +43,34 @@ function ScalePicker({ label, value, onChange, lowEnd = 'Low', highEnd = 'High' 
         }
       }}
     >
-      {ids.map((v) => (
-        <button
-          key={v}
-          type="button"
-          role="radio"
-          aria-checked={value === v}
-          aria-label={`${label}: ${v} of 5, ${v === 1 ? lowEnd : v === 5 ? highEnd : ''}`}
-          className={`scale-chip${value === v ? ' active' : ''}`}
-          tabIndex={value === v ? 0 : -1}
-          onClick={() => onChange(v)}
-        >
-          {v}
-        </button>
-      ))}
+      <div className="rating-header">
+        <span className="rating-label">{label}</span>
+        <span className="rating-value" style={{ color: accentColor }}>{value}/5</span>
+      </div>
+      <div className="rating-controls">
+        <span className="scale-label">{lowEnd}</span>
+        <div className="rating-buttons">
+          {ids.map((score) => (
+            <button
+              key={score}
+              type="button"
+              role="radio"
+              aria-checked={value === score}
+              aria-label={`${label}: ${score} of 5`}
+              className={`rating-btn${value >= score ? ' active' : ''}`}
+              tabIndex={value === score ? 0 : -1}
+              style={{
+                borderColor: value >= score ? accentColor : undefined,
+                backgroundColor: value >= score ? accentColor : undefined,
+                boxShadow: value >= score ? `0 0 10px ${accentColor}40` : undefined
+              }}
+              onClick={() => onChange(score)}
+            />
+          ))}
+        </div>
+        <span className="scale-label">{highEnd}</span>
+      </div>
+      <span className="rating-feedback" style={{ color: accentColor }}>{getFeedback()}</span>
     </div>
   );
 }
@@ -674,9 +697,9 @@ export default function Dashboard() {
         {wellness && !wellnessEdit ? (
           <div className="wellness-summary">
             {[
-              { key: 'energy', label: 'Energy' },
-              { key: 'sleep', label: 'Sleep' },
-              { key: 'mood', label: 'Mood' },
+              { key: 'energy', label: 'Energy', accent: '#ef4444' },
+              { key: 'sleep', label: 'Sleep', accent: '#3b82f6' },
+              { key: 'mood', label: 'Mood', accent: '#10b981' },
             ].map((r) => (
               <div key={r.key} className="wellness-row">
                 <span className="wellness-label">{r.label}</span>
@@ -687,6 +710,7 @@ export default function Dashboard() {
                       role="listitem"
                       aria-hidden="true"
                       className={`scale-chip static${wellness[r.key] === v ? ' active' : ''}`}
+                      style={wellness[r.key] === v ? { background: r.accent, borderColor: r.accent } : undefined}
                     >
                       {v}
                     </span>
@@ -698,23 +722,19 @@ export default function Dashboard() {
         ) : (
           <>
             {[
-              { key: 'energy', label: 'Energy', lowEnd: 'Low', highEnd: 'High' },
-              { key: 'sleep', label: 'Sleep', lowEnd: 'Poor', highEnd: 'Excellent' },
-              { key: 'mood', label: 'Mood', lowEnd: 'Low', highEnd: 'High' },
+              { key: 'energy', label: 'Energy', accent: '#ef4444', lowEnd: 'Low', highEnd: 'High' },
+              { key: 'sleep', label: 'Sleep', accent: '#3b82f6', lowEnd: 'Poor', highEnd: 'Excellent' },
+              { key: 'mood', label: 'Mood', accent: '#10b981', lowEnd: 'Low', highEnd: 'High' },
             ].map((r) => (
-              <div key={r.key} className="wellness-row">
-                <div className="wellness-scale">
-                  <span className="wellness-label">{r.label}</span>
-                  <span className="wellness-end muted small">{r.lowEnd}</span>
-                </div>
-                <ScalePicker
-                  label={r.label}
-                  lowEnd={r.lowEnd}
-                  highEnd={r.highEnd}
-                  value={wellnessForm[r.key]}
-                  onChange={(v) => setWellnessForm((f) => ({ ...f, [r.key]: v }))}
-                />
-              </div>
+              <RatingRow
+                key={r.key}
+                label={r.label}
+                value={wellnessForm[r.key]}
+                onChange={(v) => setWellnessForm((f) => ({ ...f, [r.key]: v }))}
+                accentColor={r.accent}
+                lowEnd={r.lowEnd}
+                highEnd={r.highEnd}
+              />
             ))}
             <button
               className="btn btn-primary btn-block mt"
