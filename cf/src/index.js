@@ -26,6 +26,26 @@ const BILLING_DAYS = 30;
 const app = new Hono();
 app.use('/api/*', cors());
 
+// Security headers on every response.
+app.use('*', async (c, next) => {
+  await next();
+  c.header('X-Frame-Options', 'DENY');
+  c.header('X-Content-Type-Options', 'nosniff');
+  c.header('Referrer-Policy', 'strict-origin-when-cross-origin');
+  c.header('Permissions-Policy', 'geolocation=(), microphone=()');
+  c.header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  c.header('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' https://*.breakfree-app.workers.dev https://breakfree.breakfree-app.workers.dev; font-src 'self' data:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'");
+});
+
+// Set auth cookie from login/signup responses.
+app.use('/api/auth/*', async (c, next) => {
+  await next();
+  const setCookie = c.res.headers.get('Set-Cookie');
+  if (setCookie && setCookie.includes('bf_auth=')) {
+    c.res.headers.append('Set-Cookie', setCookie);
+  }
+});
+
 function userOf(c) {
   return c.get('user') || null;
 }
@@ -232,33 +252,60 @@ app.post('/api/auth/signup', async (c) => {
   const hash = await hashPassword(password);
   const info = await c.env.DB.prepare('INSERT INTO users (email, password_hash) VALUES (?, ?)').bind(em, hash).run();
   const user = { id: Number(info.meta.last_row_id), email: em, role: 'user' };
-  // Every new account starts with a 7-day Premium trial.
   await c.env.DB.prepare(
     `INSERT INTO subscriptions (user_id, plan, status, started_at, renews_at)
      VALUES (?, 'premium', 'trial', datetime('now'), datetime('now', '+7 days'))
      ON CONFLICT(user_id) DO NOTHING`
   ).bind(user.id).run();
   const token = await signToken(user, c.env.JWT_SECRET);
-  // Best-guess timezone from the sign-up IP (Cloudflare geolocates it). The client
-  // overwrites this with the exact IANA zone on the next visit.
   try {
     const cfTz = c.req.raw.cf?.timezone || c.req.cf?.timezone;
     if (cfTz) await c.env.DB.prepare('UPDATE users SET timezone = ? WHERE id = ?').bind(String(cfTz).slice(0, 64), user.id).run();
   } catch (e) {
     console.error('timezone inference failed:', e.message);
   }
-  return c.json({ token, user: publicUser(user) }, 201);
+  c.header('Set-Cookie', `bf_auth=${token}; HttpOnly; Secure; SameSite=Strict; Max-Age=${60 * 60 * 24 * 365}; Path=/`);
+  return c.json({ token, user: publicUser(user), expiresIn: 60 * 60 * 24 * 365 }, 201);
 });
 
 app.post('/api/auth/login', async (c) => {
   const ip = c.req.raw.headers.get('CF-Connecting-IP') || 'unknown';
   if (!rateLimit(`login:${ip}`)) return c.json({ error: 'Too many attempts. Please wait a minute and try again.' }, 429);
-  const { email, password } = await c.req.json().catch(() => ({}));
+  const { email, password, rememberMe } = await c.req.json().catch(() => ({}));
   if (!email || !password) return c.json({ error: 'Email and password are required.' }, 400);
   const user = await c.env.DB.prepare('SELECT * FROM users WHERE email = ?').bind(String(email).toLowerCase()).first();
   if (!user || !(await verifyPassword(password, user.password_hash))) return c.json({ error: 'Invalid email or password.' }, 401);
-  const token = await signToken(user, c.env.JWT_SECRET);
-  return c.json({ token, user: publicUser(user) });
+  const expiresSec = rememberMe ? 60 * 60 * 24 * 7 : 60 * 60;
+  const token = await signToken(user, c.env.JWT_SECRET, expiresSec);
+  c.header('Set-Cookie', `bf_auth=${token}; HttpOnly; Secure; SameSite=Strict; Max-Age=${expiresSec}; Path=/`);
+  return c.json({ token, user: publicUser(user), expiresIn: expiresSec });
+});
+
+app.post('/api/auth/forgot-password', async (c) => {
+  const { email } = await c.req.json().catch(() => ({}));
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return c.json({ error: 'Please enter a valid email address.' }, 400);
+  const user = await c.env.DB.prepare('SELECT id, email FROM users WHERE email = ?').bind(String(email).toLowerCase().trim()).first();
+  if (user) {
+    const token = randomHex(32);
+    const expiresAt = Date.now() + 60 * 60 * 1000;
+    await c.env.DB.prepare('INSERT INTO password_reset_tokens (email, token, expires_at) VALUES (?, ?, ?)').bind(user.email, token, expiresAt).run();
+  }
+  return c.json({ message: 'If this email exists, a reset link was sent.' }, 200);
+});
+
+app.post('/api/auth/reset-password', async (c) => {
+  const { token, newPassword } = await c.req.json().catch(() => ({}));
+  if (!token || !newPassword) return c.json({ error: 'Token and new password are required.' }, 400);
+  if (newPassword.length < 8) return c.json({ error: 'Password must be at least 8 characters.' }, 400);
+  if (!/[A-Z]/.test(newPassword)) return c.json({ error: 'Password must include at least one uppercase letter.' }, 400);
+  if (!/[0-9]/.test(newPassword)) return c.json({ error: 'Password must include at least one number.' }, 400);
+  if (!/[^A-Za-z0-9]/.test(newPassword)) return c.json({ error: 'Password must include at least one symbol (!@#$%^&*).' }, 400);
+  const record = await c.env.DB.prepare('SELECT id, email, expires_at, used FROM password_reset_tokens WHERE token = ?').bind(token).first();
+  if (!record || record.used || record.expires_at < Date.now()) return c.json({ error: 'Invalid or expired token.' }, 400);
+  const hash = await hashPassword(newPassword);
+  await c.env.DB.prepare('UPDATE users SET password_hash = ? WHERE email = ?').bind(hash, record.email).run();
+  await c.env.DB.prepare('UPDATE password_reset_tokens SET used = 1 WHERE id = ?').bind(record.id).run();
+  return c.json({ message: 'Password reset successfully.' }, 200);
 });
 
 app.get('/api/auth/me', async (c) => {

@@ -33,6 +33,7 @@ export default function AuthPage({ mode }) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
+  const [rememberMe, setRememberMe] = useState(false);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
   const [touched, setTouched] = useState({ email: false, password: false });
@@ -52,7 +53,7 @@ export default function AuthPage({ mode }) {
     try {
       const data = await api(isLogin ? '/auth/login' : '/auth/signup', {
         method: 'POST',
-        body: { email, password },
+        body: isLogin ? { email, password, rememberMe } : { email, password },
       });
       handleAuth(data);
       navigate('/app', { replace: true });
@@ -130,7 +131,7 @@ export default function AuthPage({ mode }) {
                 <label className="remember-row">
                   <input type="checkbox" /> Remember me
                 </label>
-                <Link to="/forgot" className="forgot-link">Forgot password?</Link>
+                <Link to="/forgot-password" className="forgot-link">Forgot password?</Link>
               </div>
             )}
           </div>
