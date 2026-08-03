@@ -1315,6 +1315,7 @@ app.get('/api/admin/status', async (c) => {
   if (u.role !== 'admin') return c.json({ error: 'Admin access required.' }, 403);
   const counts = await countsFor(c.env);
   const premium = await c.env.DB.prepare("SELECT COUNT(*) AS n FROM subscriptions WHERE plan = 'premium' AND status = 'active'").first();
+  const trials = await c.env.DB.prepare("SELECT COUNT(*) AS n FROM subscriptions WHERE plan = 'premium' AND status = 'trial'").first();
   const errors24h = await c.env.DB.prepare("SELECT COUNT(*) AS n FROM app_errors WHERE created_at > datetime('now', '-24 hours')").first();
   const metaRows = {};
   for (const r of (await c.env.DB.prepare("SELECT key, value FROM meta WHERE key IN ('nudges_last_run','nudges_last_sent','nudges_sent')").all()).results) {
@@ -1385,6 +1386,7 @@ app.get('/api/admin/status', async (c) => {
     startedAt: new Date(Date.now() - uptime * 1000).toISOString(),
     counts,
     premiumUsers: Number(premium?.n || 0),
+    trialUsers: Number(trials?.n || 0),
     errors24h: Number(errors24h || 0),
     notifications,
     today: { checkins: todayCheckins, urges: todayUrges },
