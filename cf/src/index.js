@@ -163,7 +163,7 @@ function publicUser(u) {
 // In-memory rate limiter: key → [timestamps]. Cleans up old entries on each call.
 const RATE_LIMITS = new Map();
 const RATE_WINDOW_MS = 60 * 1000;
-const RATE_MAX = 2;
+const RATE_MAX = 10;
 
 function rateLimit(key) {
   const now = Date.now();
@@ -175,16 +175,18 @@ function rateLimit(key) {
   return true;
 }
 
-// Global rate limit on all auth endpoints: 2 requests/minute per IP (testing).
-app.use('/api/auth*', async (c, next) => {
+function authRateLimit(c) {
   const ip = c.req.raw.headers.get('CF-Connecting-IP') || 'unknown';
-  const allowed = rateLimit(`auth:${ip}`);
-  console.log(`[rate limit] auth:${ip} allowed=${allowed} path=${c.req.url}`);
-  if (!allowed) return c.json({ error: 'Too many attempts. Please wait a minute and try again.', _rateLimited: true }, 429);
+  if (!rateLimit(`auth:${ip}`)) return c.json({ error: 'Too many attempts. Please wait a minute and try again.' }, 429);
+  return null;
+}
+
+// Global rate limit on all auth endpoints: 10 requests/minute per IP.
+app.use('/api/auth*', async (c, next) => {
+  const rl = authRateLimit(c);
+  if (rl) return rl;
   await next();
 });
-
-// Remove per-route rate limits once global middleware is confirmed working.
 
 function parseTriggerTimes(raw) {
   try {
