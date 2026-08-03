@@ -350,6 +350,23 @@ app.post('/api/auth/reset-password', async (c) => {
   return c.json({ message: 'Password reset successfully.' }, 200);
 });
 
+app.post('/api/auth/change-password', async (c) => {
+  const u = userOf(c);
+  if (!u) return c.json({ error: 'Not authenticated' }, 401);
+  const { currentPassword, newPassword } = await c.req.json().catch(() => ({}));
+  if (!currentPassword || !newPassword) return c.json({ error: 'Current and new password are required.' }, 400);
+  const user = await c.env.DB.prepare('SELECT password_hash FROM users WHERE id = ?').bind(u.id).first();
+  if (!user || !(await verifyPassword(currentPassword, user.password_hash))) return c.json({ error: 'Current password is incorrect.' }, 401);
+  if (newPassword.length < 8) return c.json({ error: 'Password must be at least 8 characters.' }, 400);
+  if (!/[A-Z]/.test(newPassword)) return c.json({ error: 'Password must include at least one uppercase letter.' }, 400);
+  if (!/[0-9]/.test(newPassword)) return c.json({ error: 'Password must include at least one number.' }, 400);
+  if (!/[^A-Za-z0-9]/.test(newPassword)) return c.json({ error: 'Password must include at least one symbol (!@#$%^&*).' }, 400);
+  if (newPassword === currentPassword) return c.json({ error: 'New password must be different from your current password.' }, 400);
+  const hash = await hashPassword(newPassword);
+  await c.env.DB.prepare('UPDATE users SET password_hash = ? WHERE id = ?').bind(hash, u.id).run();
+  return c.json({ message: 'Password changed successfully.' }, 200);
+});
+
 app.get('/api/auth/me', async (c) => {
   const u = userOf(c);
   if (!u) return c.json({ error: 'Not authenticated' }, 401);

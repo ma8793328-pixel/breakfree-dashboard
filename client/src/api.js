@@ -78,6 +78,23 @@ export async function deleteAccount(token) {
   return res.json();
 }
 
+// Change the logged-in user's password (requires current password).
+export async function changePassword(token, currentPassword, newPassword) {
+  const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+  const res = await fetch('/api/auth/change-password', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ currentPassword, newPassword }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    const err = new Error(data.error || 'Password change failed.');
+    err.status = res.status;
+    throw err;
+  }
+  return res.json();
+}
+
 // Health/wellness samples (manual entry: steps, sleep hours, resting HR).
 export async function fetchHealthSamples(habitId, token, days = 30) {
   return api(`/health?habitId=${habitId}&days=${days}`, { token });

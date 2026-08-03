@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import Layout from '../components/Layout.jsx';
 import { useAuth } from '../auth.jsx';
 import { usePushNotifications } from '../usePushNotifications.js';
-import { api, exportAccountData, deleteAccount } from '../api.js';
+import { api, exportAccountData, deleteAccount, changePassword } from '../api.js';
 
 const PREFS = [
   { key: 'triggerNudges', title: 'Trigger-time nudges', desc: 'A nudge at your usual trigger times to log how you\'re feeling.' },
@@ -30,6 +30,30 @@ function Toggle({ checked, onChange, label }) {
   );
 }
 
+function PasswordField({ label, value, onChange, show, onToggleShow }) {
+  return (
+    <div>
+      <label style={{ display: 'block', fontSize: 13, fontWeight: 700, color: 'var(--cream)', marginBottom: 4 }}>{label}</label>
+      <div className="password-wrap">
+        <input
+          id={label}
+          type={show ? 'text' : 'password'}
+          autoComplete={label === 'Current password' ? 'current-password' : 'new-password'}
+          placeholder={label}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          className="field"
+        />
+        {onToggleShow && (
+          <button type="button" className="password-toggle" onClick={onToggleShow} aria-label={show ? 'Hide password' : 'Show password'}>
+            {show ? '🙈' : '👁️'}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function SettingsPage() {
   const { token, user, logout } = useAuth();
   const { supported: pushSupported, status: pushStatus, subscribe: enablePush, error: pushError } =
@@ -41,6 +65,14 @@ export default function SettingsPage() {
   const [exportMsg, setExportMsg] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleteBusy, setDeleteBusy] = useState(false);
+  const [pwCurrent, setPwCurrent] = useState('');
+  const [pwNew, setPwNew] = useState('');
+  const [pwConfirm, setPwConfirm] = useState('');
+  const [pwBusy, setPwBusy] = useState(false);
+  const [pwError, setPwError] = useState(null);
+  const [pwSuccess, setPwSuccess] = useState(null);
+  const [showPwCurrent, setShowPwCurrent] = useState(false);
+  const [showPwNew, setShowPwNew] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -90,6 +122,27 @@ export default function SettingsPage() {
       setError(e.message);
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function handleChangePassword() {
+    setPwBusy(true);
+    setPwError(null);
+    setPwSuccess(null);
+    try {
+      if (pwNew !== pwConfirm) {
+        setPwError('New passwords do not match.');
+        return;
+      }
+      await changePassword(token, pwCurrent, pwNew);
+      setPwSuccess('Password changed successfully.');
+      setPwCurrent('');
+      setPwNew('');
+      setPwConfirm('');
+    } catch (e) {
+      setPwError(e.message);
+    } finally {
+      setPwBusy(false);
     }
   }
 
@@ -189,6 +242,23 @@ export default function SettingsPage() {
           </div>
         )}
         {busy && <p className="muted small" style={{ marginTop: 10 }}>Saving…</p>}
+      </div>
+
+      <div className="card">
+        <p className="card-title">🔒 Password</p>
+        <p className="muted small" style={{ marginBottom: 12 }}>
+          Change your account password. You&apos;ll need to know your current one.
+        </p>
+        {pwError && <p className="error-text">{pwError}</p>}
+        {pwSuccess && <p className="muted small" style={{ marginBottom: 8, color: 'var(--sage)' }}>{pwSuccess}</p>}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <PasswordField label="Current password" value={pwCurrent} onChange={setPwCurrent} show={showPwCurrent} onToggleShow={() => setShowPwCurrent((v) => !v)} />
+          <PasswordField label="New password" value={pwNew} onChange={setPwNew} show={showPwNew} onToggleShow={() => setShowPwNew((v) => !v)} />
+          <PasswordField label="Confirm new password" value={pwConfirm} onChange={setPwConfirm} show={false} onToggleShow={() => {}} />
+        </div>
+        <button className="btn btn-primary btn-block mt" onClick={handleChangePassword} disabled={pwBusy || !pwCurrent || !pwNew || !pwConfirm}>
+          {pwBusy ? 'Saving...' : 'Change password'}
+        </button>
       </div>
 
       <div className="card">
