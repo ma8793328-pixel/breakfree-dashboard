@@ -1625,6 +1625,15 @@ a {
   transform: scale(0.93);
 }
 
+.fab-exit {
+  right: auto;
+  left: max(16px, calc((100vw - 480px) / 2 + 16px));
+  background: var(--card);
+  border: 2px solid var(--border);
+  color: var(--muted);
+  box-shadow: var(--shadow-soft);
+}
+
 /* ---------- Report preview ---------- */
 
 .report-preview {

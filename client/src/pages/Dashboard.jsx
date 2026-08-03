@@ -432,14 +432,6 @@ export default function Dashboard() {
           <button className="btn btn-ghost btn-sm" onClick={() => navigate('/app/days-out')}>
             📍 Change of scene
           </button>
-          <button
-            className="btn btn-ghost btn-sm"
-            onClick={() => window.open('https://www.google.com', '_blank')}
-            aria-label="Quick exit — opens a neutral page"
-            title="Quick exit"
-          >
-            🚪 Quick exit
-          </button>
           <div className="menu-wrap">
             <button className="menu-btn" onClick={() => setMenuOpen((v) => !v)} aria-label="Menu">
               {user?.email?.slice(0, 1).toUpperCase()}
@@ -783,6 +775,14 @@ export default function Dashboard() {
         title="Log an urge"
       >
         ⚡
+      </button>
+      <button
+        className="fab fab-exit"
+        onClick={() => window.open('https://www.google.com', '_blank')}
+        aria-label="Quick exit — opens a neutral page"
+        title="Quick exit"
+      >
+        🚪
       </button>
 
       {active.stats.moneySaved > 0 || active.stats.timeSaved > 0 || active.stats.unitsAvoided > 0 || totalResisted > 0 ? (
