@@ -31,6 +31,17 @@ export function checkinNote(ctx = {}) {
 }
 
 // A short, proactive daily note grounded in the user's own data.
+const ACTION_STEPS = [
+  'Right now, open your phone\u2019s app drawer and delete one gambling-related app.',
+  'Tonight, try a 5-minute walk around the block before you do anything else.',
+  'Pick one urge you logged today and write one sentence about what triggered it in your journal.',
+  'Text one person in your support circle right now — even just a emoji.',
+  'Put your phone away 30 minutes earlier than usual tonight. Protect your sleep.',
+  'Do 10 push-ups or stretch for 2 minutes — a physical shift interrupts autopilot.',
+  'Open the BreakFree urge tools and try one 2-minute breathing exercise.',
+  'Review your block list and add one more site or app you want to avoid.',
+];
+
 export function dailyCoachNote(ctx = {}) {
   const s = ctx?.streak ?? 0;
   const ci = ctx?.dailyCheckin || null;
@@ -54,18 +65,39 @@ export function dailyCoachNote(ctx = {}) {
   } else {
     lines.push('Every streak starts with one clean day. Make today that day.');
   }
+
   if (ci) {
-    const lows = [];
-    if (ci.energy != null && ci.energy <= 2) lows.push('energy');
-    if (ci.sleep != null && ci.sleep <= 2) lows.push('sleep');
-    if (ci.mood != null && ci.mood <= 2) lows.push('mood');
-    if (lows.length) lines.push(`Your ${lows.join(' and ')} is running low today — treat urges like weather you can wait out, not orders.`);
-    else if ((ci.energy ?? 0) >= 4 && (ci.mood ?? 0) >= 4) lines.push('Strong energy and mood today — a good day to bank a clean check-in.');
-    else lines.push('Your check-in is saved — keep the basics boring: water, food, rest.');
+    const hasLow = (v) => v != null && v <= 2;
+    const hasHigh = (v) => v != null && v >= 4;
+    if (hasHigh(ci.mood) && hasHigh(ci.energy)) {
+      lines.push('Your mood and energy are both high right now — this is the perfect time to tackle one small thing you\u2019ve been putting off.');
+    } else if (hasLow(ci.mood) && hasLow(ci.energy)) {
+      lines.push('I notice both your mood and energy are running low. That combination is a common trigger, so let\u2019s not rely on willpower alone — try a 2-minute breathing exercise before anything else.');
+    } else if (hasLow(ci.mood) && hasHigh(ci.energy)) {
+      lines.push('Your energy is there but your mood is dragging — that\u2019s a tricky combination. A quick change of scene can break the loop before it builds.');
+    } else if (hasLow(ci.energy)) {
+      lines.push('Low energy quietly lowers your resistance to urges. Protect your energy today: drink a glass of water, eat something small, and rest if you can.');
+    } else if (hasLow(ci.sleep)) {
+      lines.push('Rough sleep lowers your guard. If you\u2019re tired right now, that\u2019s normal — but urges feel louder when you\u2019re exhausted. Go easy on yourself today.');
+    } else if (hasLow(ci.mood)) {
+      lines.push('Heavy feelings are temporary — they pass like weather. You don\u2019t have to fix your mood right now, you just have to not act on it.');
+    } else {
+      lines.push('Your check-in is saved. The basics are boring — water, food, rest — and that\u2019s exactly what builds a streak.');
+    }
   }
-  if (todayUrges > 0) lines.push(`You\u2019ve logged ${todayUrges} urge${todayUrges === 1 ? '' : 's'} today — naming them is the win. Each one you log, you shrink.`);
-  else if (s > 0) lines.push('No urges logged today yet — sometimes the silence is the strongest sign.');
+
+  if (todayUrges > 0) {
+    lines.push(`You\u2019ve logged ${todayUrges} urge${todayUrges === 1 ? '' : 's'} today — naming them is half the battle. Each one you don\u2019t act on makes the next one weaker.`);
+  } else if (s > 0) {
+    lines.push('No urges logged today yet — sometimes the silence is the strongest sign. Keep it that way.');
+  }
+
   if (ctx?.reason) lines.push(`Remember why: \u201C${ctx.reason}\u201D.`);
+
+  const seed = (s + (ci?.energy ?? 0) + (ci?.mood ?? 0) + todayUrges) | 0;
+  const action = ACTION_STEPS[Math.abs(seed) % ACTION_STEPS.length];
+  lines.push(`Tiny next step: ${action}`);
+
   return lines.join(' ');
 }
 

@@ -1116,6 +1116,19 @@ a {
   }
 }
 
+.breathe-loader {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: radial-gradient(circle, var(--accent-soft) 0%, transparent 70%);
+  animation: breathe 3s ease-in-out infinite;
+}
+
+@keyframes breathe {
+  0%, 100% { transform: scale(0.85); opacity: 0.6; }
+  50% { transform: scale(1.15); opacity: 1; }
+}
+
 .brand-mark {
   font-size: 52px;
   animation: float 2.4s ease-in-out infinite;
@@ -1885,6 +1898,19 @@ a {
   border: 2px solid var(--border);
   color: var(--muted);
   box-shadow: var(--shadow-soft);
+}
+
+.fab-emergency {
+  right: calc(max(16px, calc((100vw - 480px) / 2 + 16px)) + 72px);
+  background: linear-gradient(135deg, #dc2626, #991b1b);
+  color: #fff;
+  font-size: 22px;
+  animation: fab-pulse 2s ease-in-out infinite;
+}
+
+@keyframes fab-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.6); }
+  50% { box-shadow: 0 0 0 12px rgba(220, 38, 38, 0); }
 }
 
 /* ---------- Report preview ---------- */

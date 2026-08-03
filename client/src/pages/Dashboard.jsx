@@ -4,7 +4,7 @@ import Layout from '../components/Layout.jsx';
 import { useAuth } from '../auth.jsx';
 import { useHabits } from '../habits.jsx';
 import { api, localDate, forgiveCheckin, spendShieldToken } from '../api.js';
-import { MILESTONES, pickQuote, unitLabel } from '../data.js';
+import { MILESTONES, SKILL_BADGES, pickQuote, unitLabel } from '../data.js';
 import { dailyCoachNote, wallMessage, SURVIVAL_NOTE } from '../aiCoach.js';
 import UrgeModal from '../components/UrgeModal.jsx';
 import UrgeQuickPanel from '../components/UrgeQuickPanel.jsx';
@@ -102,6 +102,7 @@ export default function Dashboard() {
   const [todayUrgeCount, setTodayUrgeCount] = useState(0);
   const [urgePeak, setUrgePeak] = useState(null);
   const [totalUrges, setTotalUrges] = useState(0);
+  const [allUrges, setAllUrges] = useState([]);
   const shieldTokens = active?.shieldTokens || 0;
   const [totalResisted, setTotalResisted] = useState(0);
   const [busy, setBusy] = useState(false);
@@ -256,6 +257,7 @@ export default function Dashboard() {
         if (!cancelled) {
           const t = localDate();
           const allUrges = data.urges || [];
+          setAllUrges(allUrges);
           setTotalUrges(allUrges.length);
           setTotalResisted(allUrges.filter((u) => u.resisted).length);
           setTodayUrgeCount(allUrges.filter((u) => String(u.logged_at || '').slice(0, 10) === t).length);
@@ -543,7 +545,7 @@ export default function Dashboard() {
                   <button className="menu-item" onClick={() => { setMenuOpen(false); navigate('/app/settings'); }}>
                     🔔 Notifications
                   </button>
-                  <button className="menu-item" onClick={() => { setMenuOpen(false); navigate('/app/help'); }}>
+                  <button className="menu-item" onClick={() => { setMenuOpen(false); navigate('/app/help', { state: { urgent: !!(urgePeak || todayUrgeCount > 0) } }); }}>
                     🆘 Get help
                   </button>
                   {user?.role === 'admin' && (
@@ -849,11 +851,16 @@ export default function Dashboard() {
           <div style={{ flex: 1 }}>
             <p className="card-title" style={{ margin: 0 }}>Get help right now</p>
             <p className="muted small" style={{ marginTop: 2 }}>
-              Urge hitting hard? Call a support line, breathe through it, or find local resources.
+              {urgePeak || todayUrgeCount > 0
+                ? 'Urge hitting hard? Tap below for immediate support.'
+                : 'Urge hitting hard? Call a support line, breathe through it, or find local resources.'}
             </p>
           </div>
         </div>
-        <button className="btn btn-ghost btn-sm mt" onClick={() => navigate('/app/help')}>
+        <button
+          className="btn btn-ghost btn-sm mt"
+          onClick={() => navigate('/app/help', { state: { urgent: !!(urgePeak || todayUrgeCount > 0) } })}
+        >
           Open help
         </button>
       </div>
@@ -866,6 +873,16 @@ export default function Dashboard() {
       >
         ⚡
       </button>
+      {(urgePeak || todayUrgeCount > 0) && (
+        <button
+          className="fab fab-emergency"
+          onClick={() => navigate('/app/help')}
+          aria-label="Get help now"
+          title="Get help right now"
+        >
+          🆘
+        </button>
+      )}
       <button
         className="fab fab-exit"
         onClick={() => window.open('https://www.google.com', '_blank')}
@@ -1042,6 +1059,38 @@ export default function Dashboard() {
             </div>
           )}
         </div>
+        {(() => {
+          const skillCtx = {
+            urges: allUrges,
+            moneySaved: active?.stats?.moneySaved || 0,
+            streak: streak || 0,
+            journalWeekBadgeEarned: active?.journalWeekBadgeEarned || false,
+          };
+          const earnedSkills = SKILL_BADGES.filter((s) => s.check(skillCtx));
+          if (earnedSkills.length === 0) return null;
+          return (
+            <div style={{ marginTop: 12 }}>
+              <p className="muted small" style={{ marginBottom: 6 }}>Skills unlocked</p>
+              <div className="badge-row" style={{ gap: 8 }}>
+                {earnedSkills.map((s) => (
+                  <button
+                    key={s.id}
+                    className="badge earned"
+                    style={{ '--tier': s.tier, background: 'none', cursor: 'pointer', padding: 0 }}
+                    title={`${s.label}: ${s.desc}`}
+                    onClick={() => {
+                      setFlow({ kind: 'share', badge: { threshold: s.id, label: s.label, icon: s.icon, tier: s.tier, desc: s.desc, skill: s.id } });
+                    }}
+                  >
+                    <div className="medal">{s.icon}</div>
+                    <div className="days">{s.label}</div>
+                  </button>
+                ))}
+              </div>
+              <p className="muted small" style={{ marginTop: 6, fontSize: 11 }}>Tap a skill badge to share it</p>
+            </div>
+          );
+        })()}
       </div>
 
       {flow?.kind === 'slipNote' && (
@@ -1133,6 +1182,7 @@ export default function Dashboard() {
           habitName={active.name}
           days={flow.badge.threshold}
           moneySaved={active.stats.moneySaved}
+          skill={flow.badge.skill}
           onClose={closeFlow}
         />
       )}

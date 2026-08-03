@@ -1,16 +1,19 @@
 import { useEffect, useState } from 'react';
 import { useAuth } from '../auth.jsx';
 import { recordShare, fetchShareTotal } from '../api.js';
-import { MILESTONES } from '../data.js';
+import { MILESTONES, SKILL_BADGES } from '../data.js';
 
-export default function ShareCard({ habitId, habitName, days, moneySaved, onClose }) {
+export default function ShareCard({ habitId, habitName, days, moneySaved, onClose, skill }) {
   const { token } = useAuth();
   const [shared, setShared] = useState(false);
   const [total, setTotal] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
 
-  const meta = MILESTONES.find((m) => m.days === days) || { icon: '🏆', label: `${days} Days`, tier: '#888888' };
+  const isSkill = !!skill;
+  const meta = isSkill
+    ? SKILL_BADGES.find((s) => s.id === skill) || { icon: '⭐', label: skill, tier: '#888888' }
+    : MILESTONES.find((m) => m.days === days) || { icon: '🏆', label: `${days} Days`, tier: '#888888' };
 
   useEffect(() => {
     document.body.style.overflow = 'hidden';
@@ -27,7 +30,7 @@ export default function ShareCard({ habitId, habitName, days, moneySaved, onClos
     setBusy(true);
     setError(null);
     try {
-      const d = await recordShare(habitId, days, token);
+      const d = await recordShare(habitId, days || skill, token);
       setTotal(d.total);
       setShared(true);
     } catch (e) {
@@ -48,12 +51,21 @@ export default function ShareCard({ habitId, habitName, days, moneySaved, onClos
             </span>
             <span className="share-card-badge">{meta.icon}</span>
           </div>
-          <div className="share-card-days">
-            <span className="share-card-num">{days}</span>
-            <span className="share-card-unit">days clean</span>
-          </div>
-          <p className="share-card-name">“{habitName}” — my day {days} is done.</p>
-          {moneySaved > 0 && (
+          {isSkill ? (
+            <div className="share-card-days">
+              <span className="share-card-num">{meta.icon}</span>
+              <span className="share-card-unit">{meta.label}</span>
+            </div>
+          ) : (
+            <div className="share-card-days">
+              <span className="share-card-num">{days}</span>
+              <span className="share-card-unit">days clean</span>
+            </div>
+          )}
+          <p className="share-card-name">
+            {isSkill ? `Unlocked: ${meta.label}` : `"${habitName}" — my day ${days} is done.`}
+          </p>
+          {!isSkill && moneySaved > 0 && (
             <p className="share-card-saved">
               <strong>£{moneySaved.toLocaleString()}</strong> saved along the way
             </p>

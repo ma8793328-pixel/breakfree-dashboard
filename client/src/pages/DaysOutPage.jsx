@@ -4,6 +4,25 @@ import Layout from '../components/Layout.jsx';
 import { useAuth } from '../auth.jsx';
 import { api } from '../api.js';
 
+const INSTANT_ACTIVITIES = [
+  { icon: '🚶', title: 'Walk around the block', desc: '5 minutes outside changes the loop.', route: null },
+  { icon: '🧊', title: 'Splash cold water on your face', desc: 'A physical reset that snaps you out of autopilot.', route: null },
+  { icon: '📞', title: 'Call a friend or buddy', desc: 'Voice contact interrupts the craving loop.', route: null },
+  { icon: '🧩', title: 'Do a puzzle or game', desc: 'Occupy your hands and mind for 5 minutes.', route: null },
+  { icon: '🏃', title: '10 push-ups or stretches', desc: 'Burn the nervous energy physically.', route: null },
+  { icon: '🧘', title: '2-minute breathing exercise', desc: 'Breathe in 4, hold 4, out 4, hold 4.', route: '/app/urges' },
+  { icon: '📝', title: 'Write it out in your journal', desc: 'Name the trigger — naming it weakens it.', route: '/app/journal' },
+  { icon: '🌊', title: 'Hold an ice cube', desc: 'Intense cold focus shifts your attention instantly.', route: null },
+];
+
+const ENVIRONMENT_OPTIONS = [
+  { value: 'home', label: 'At home' },
+  { value: 'work', label: 'At work or school' },
+  { value: 'trigger', label: 'Near a betting shop / casino' },
+  { value: 'social', label: 'With people who gamble' },
+  { value: 'other', label: 'Somewhere else' },
+];
+
 export default function DaysOutPage() {
   const { token } = useAuth();
   const navigate = useNavigate();
@@ -15,6 +34,8 @@ export default function DaysOutPage() {
   const [loading, setLoading] = useState(false);
   const [locating, setLocating] = useState(false);
   const [error, setError] = useState(null);
+  const [envCheck, setEnvCheck] = useState(null);
+  const [showEnvCheck, setShowEnvCheck] = useState(true);
 
   useEffect(() => {
     loadFallback();
@@ -84,6 +105,21 @@ export default function DaysOutPage() {
     fetchIdeas(`?area=${encodeURIComponent(area.trim())}&radius=${radius * 1000}`);
   }
 
+  function handleEnvSelect(value) {
+    setEnvCheck(value);
+    setShowEnvCheck(false);
+    if (value === 'trigger' || value === 'social') {
+      setIdeas(INSTANT_ACTIVITIES);
+      setSource('instant');
+    }
+  }
+
+  function handleActivityClick(act) {
+    if (act.route) {
+      navigate(act.route);
+    }
+  }
+
   if (error && ideas === null) {
     return (
       <Layout>
@@ -94,7 +130,7 @@ export default function DaysOutPage() {
             <div className="icon">⚠️</div>
             <div className="title">Couldn't load suggestions</div>
             <p>{error}</p>
-            <button className="btn btn-primary mt" onClick={searchNearby}>
+            <button className="btn btn-primary mt" onClick={loadFallback}>
               Try again
             </button>
           </div>
@@ -107,6 +143,94 @@ export default function DaysOutPage() {
     <Layout>
       <h1 className="page-title">Change of scene</h1>
       <p className="page-sub">When an urge hits, change the scene. Here's where to go nearby.</p>
+
+      {showEnvCheck && (
+        <div className="card" style={{ borderColor: 'rgba(245, 158, 11, 0.35)' }}>
+          <p className="card-title">📍 Where are you right now?</p>
+          <p className="muted small" style={{ marginBottom: 12 }}>
+            This helps us give you the right kind of support right now.
+          </p>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {ENVIRONMENT_OPTIONS.map((opt) => (
+              <button
+                key={opt.value}
+                className="btn btn-ghost"
+                style={{ justifyContent: 'flex-start', textAlign: 'left' }}
+                onClick={() => handleEnvSelect(opt.value)}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {envCheck === 'trigger' && (
+        <div className="card" style={{ borderColor: 'rgba(229, 9, 20, 0.4)', background: 'rgba(229, 9, 20, 0.06)' }}>
+          <p className="card-title" style={{ color: 'var(--slip)' }}>⚠️ High-risk zone</p>
+          <p className="muted small" style={{ marginBottom: 12 }}>
+            Being near a betting shop or casino is one of the hardest situations. Don't rely on willpower — use a tool right now.
+          </p>
+          <div className="row">
+            <button className="btn btn-primary" style={{ flex: 1 }} onClick={() => navigate('/app/urges')}>
+              Open Urge Tools
+            </button>
+            <button className="btn btn-ghost" style={{ flex: 1 }} onClick={() => navigate('/app/help')}>
+              Get Help
+            </button>
+          </div>
+        </div>
+      )}
+
+      {envCheck === 'social' && (
+        <div className="card" style={{ borderColor: 'rgba(245, 158, 11, 0.35)', background: 'rgba(245, 158, 11, 0.06)' }}>
+          <p className="card-title" style={{ color: '#f59e0b' }}>👥 Social risk</p>
+          <p className="muted small" style={{ marginBottom: 12 }}>
+            Being with people who gamble can feel like pressure. You don't have to join in to belong.
+          </p>
+          <div className="row">
+            <button className="btn btn-primary" style={{ flex: 1 }} onClick={() => navigate('/app/urges')}>
+              Try a coping tool
+            </button>
+            <button className="btn btn-ghost" style={{ flex: 1 }} onClick={() => navigate('/app/coach')}>
+              Talk to your coach
+            </button>
+          </div>
+        </div>
+      )}
+
+      {source === 'instant' && envCheck && (
+        <div className="card">
+          <p className="card-title">⚡ 5-minute distractions</p>
+          <p className="muted small" style={{ marginBottom: 12 }}>
+            Pick one right now. You don't need to commit to anything longer.
+          </p>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 10 }}>
+            {INSTANT_ACTIVITIES.map((act, i) => (
+              <button
+                key={i}
+                style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'flex-start',
+                  gap: 4,
+                  padding: 14,
+                  textAlign: 'left',
+                  background: 'var(--card-2)',
+                  border: '1px solid var(--border)',
+                  borderRadius: 14,
+                  cursor: 'pointer',
+                }}
+                onClick={() => handleActivityClick(act)}
+              >
+                <span style={{ fontSize: 22 }}>{act.icon}</span>
+                <span style={{ fontWeight: 700, fontSize: 14, color: 'var(--cream)' }}>{act.title}</span>
+                <span style={{ fontSize: 12, color: 'var(--muted-2)' }}>{act.desc}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="card">
         <p className="card-title">📍 Find somewhere nearby</p>
@@ -147,9 +271,10 @@ export default function DaysOutPage() {
 
       {loading ? (
         <div className="loading-screen" style={{ minHeight: '30vh' }}>
-          <div className="spinner" />
+          <div className="breathe-loader" />
+          <p className="muted small">Finding spots nearby...</p>
         </div>
-      ) : ideas ? (
+      ) : ideas && source !== 'instant' ? (
         <>
           <p className="page-sub">
             {source === 'overpass'

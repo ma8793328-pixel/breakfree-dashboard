@@ -8,6 +8,14 @@ export const MILESTONES = [
   { days: 365, label: 'Legend', icon: '👑', tier: '#E50914' },
 ];
 
+export const SKILL_BADGES = [
+  { id: 'urge_surfer', label: 'Urge Surfer', icon: '🏄', tier: '#00B894', desc: 'Ridden out 5 urges', check: (ctx) => (ctx?.urges?.filter((u) => u.resisted).length || 0) >= 5 },
+  { id: 'financial_guardian', label: 'Financial Guardian', icon: '🛡️', tier: '#F5A623', desc: 'Saved £500', check: (ctx) => (ctx?.moneySaved || 0) >= 500 },
+  { id: 'week_reflector', label: 'Reflector', icon: '📝', tier: '#A8C09A', desc: 'Journal 3× this week', check: (ctx) => !!ctx?.journalWeekBadgeEarned },
+  { id: 'streak_builder', label: 'Streak Builder', icon: '🔥', tier: '#E50914', desc: '14-day streak', check: (ctx) => (ctx?.streak || 0) >= 14 },
+  { id: 'urge_logger', label: 'Urge Logger', icon: '📋', tier: '#4A90D9', desc: 'Logged 10 urges', check: (ctx) => (ctx?.urges?.length || 0) >= 10 },
+];
+
 export const QUOTES = [
   { text: 'Every day you stay true is a day you get closer to the person you want to be.', source: 'BreakFree' },
   { text: 'You don\'t have to be perfect. You just have to begin again — today counts.', source: 'BreakFree' },

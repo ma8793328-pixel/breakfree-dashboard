@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useLocation } from 'react-router-dom';
 import Layout from '../components/Layout.jsx';
 
 const CYCLE_SECS = 19; // 4s in + 7s hold + 8s out
@@ -93,6 +94,28 @@ const SUPPORT = [
   },
 ];
 
+const BLOCKING_TOOLS = [
+  {
+    title: 'Gamban — block gambling sites',
+    url: 'https://gamban.com/',
+    desc: 'Blocks gambling apps and websites on all your devices.',
+  },
+  {
+    title: 'BetBlocker — free blocking tool',
+    url: 'https://www.betblocker.org/',
+    desc: 'Free tool to block access to gambling websites.',
+  },
+];
+
+const CRISIS = [
+  {
+    title: 'Crisis Text Line — text GAMBLE',
+    url: 'sms:85258&body=GAMBLE',
+    desc: 'Text GAMBLE to 85258 (UK) for free, 24/7 crisis support.',
+    phone: 'Text GAMBLE to 85258',
+  },
+];
+
 const HABITS = [
   {
     title: 'Atomic Habits — James Clear',
@@ -125,7 +148,10 @@ function LinkCard({ item }) {
   );
 }
 
-export default function HelpPage() {
+export default function HelpPage({ urgent = false }) {
+  const location = useLocation();
+  const isUrgent = urgent || location.state?.urgent || false;
+
   return (
     <Layout>
       <h1 className="page-title">🫂 Get help</h1>
@@ -133,29 +159,60 @@ export default function HelpPage() {
         You're not alone in this. Free, confidential help is a call or a tap away — day or night.
       </p>
 
-      <div className="card" style={{ borderLeft: '4px solid var(--accent)' }}>
-        <p className="card-title">Urge hitting hard right now?</p>
-        <p className="muted small">
-          Slow your breathing — most urges peak and fade within a few minutes. Then, if you need a
-          voice, call FRANK or Samaritans. Both are free and confidential.
-        </p>
-      </div>
+      {isUrgent && (
+        <div className="card" style={{ borderLeft: '4px solid #dc2626', background: 'rgba(220, 38, 38, 0.06)' }}>
+          <p className="card-title" style={{ color: '#dc2626' }}>⚠️ Urge hitting hard right now</p>
+          <p className="muted small">
+            You don't have to act on this. Slow your breathing, call a support line, or open the urge tools.
+            Most urges peak and fade within 10–20 minutes.
+          </p>
+          <div className="row mt">
+            <button className="btn btn-primary" style={{ flex: 1 }} onClick={() => navigate('/app/urges')}>
+              Open Urge Tools
+            </button>
+            <button className="btn btn-ghost" style={{ flex: 1 }} onClick={() => navigate('/app/help')}>
+              Breathe with me
+            </button>
+          </div>
+        </div>
+      )}
 
-      <div className="card">
+      <div className="card" style={{ borderLeft: '4px solid var(--accent)' }}>
         <p className="card-title">Breathe with me</p>
         <BreatheCard />
       </div>
 
-      <div className="card">
-        <p className="card-title">Talk to someone now</p>
-        <div className="settings-list">
-          <a className="btn btn-block" href="tel:03001236600">📞 Call FRANK — 0300 123 6600</a>
-          <a className="btn btn-block" href="tel:116123">📞 Call Samaritans — 116 123</a>
-          <p className="muted small" style={{ marginTop: 10 }}>
-            If you feel in immediate danger, call 999 now.
-          </p>
+      {isUrgent && (
+        <div className="card" style={{ borderLeft: '4px solid #f59e0b', background: 'rgba(245, 158, 11, 0.06)' }}>
+          <p className="card-title" style={{ color: '#f59e0b' }}>📞 Talk to someone now</p>
+          <div className="settings-list">
+            <a className="btn btn-block" href="tel:03001236600">📞 Call FRANK — 0300 123 6600</a>
+            <a className="btn btn-block" href="tel:116123">📞 Call Samaritans — 116 123</a>
+            {CRISIS.map((c) => (
+              <a key={c.title} className="btn btn-block" href={c.url}>
+                📱 {c.phone || c.title}
+              </a>
+            ))}
+            <p className="muted small" style={{ marginTop: 10 }}>
+              If you feel in immediate danger, call 999 now.
+            </p>
+          </div>
         </div>
-      </div>
+      )}
+
+      {isUrgent && (
+        <div className="card">
+          <p className="card-title">🛡️ Blocking tools</p>
+          <p className="muted small" style={{ marginBottom: 12 }}>
+            Take the decision out of your hands — block access to gambling sites and apps.
+          </p>
+          <div className="settings-list">
+            {BLOCKING_TOOLS.map((c) => (
+              <LinkCard key={c.title} item={c} />
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="card">
         <p className="card-title">Drug & alcohol support</p>
@@ -174,6 +231,24 @@ export default function HelpPage() {
           ))}
         </div>
       </div>
+
+      {!urgent && (
+        <div className="card" style={{ borderLeft: '4px solid #f59e0b', background: 'rgba(245, 158, 11, 0.06)' }}>
+          <p className="card-title" style={{ color: '#f59e0b' }}>📞 Talk to someone now</p>
+          <div className="settings-list">
+            <a className="btn btn-block" href="tel:03001236600">📞 Call FRANK — 0300 123 6600</a>
+            <a className="btn btn-block" href="tel:116123">📞 Call Samaritans — 116 123</a>
+            {CRISIS.map((c) => (
+              <a key={c.title} className="btn btn-block" href={c.url}>
+                📱 {c.phone || c.title}
+              </a>
+            ))}
+            <p className="muted small" style={{ marginTop: 10 }}>
+              If you feel in immediate danger, call 999 now.
+            </p>
+          </div>
+        </div>
+      )}
 
       <p className="center muted small" style={{ padding: '0 8px 8px' }}>
         Not in the UK?{' '}
