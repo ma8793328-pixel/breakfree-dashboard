@@ -182,7 +182,7 @@ function authRateLimit(c) {
 }
 
 // Global rate limit on all auth endpoints: 10 requests/minute per IP.
-app.use('/api/auth*', async (c, next) => {
+app.use('/api/auth/*', async (c, next) => {
   c.res.headers.append('X-RateLimit-Test', '1');
   const rl = authRateLimit(c);
   if (rl) return rl;
@@ -252,6 +252,13 @@ app.get('/terms', (c) => c.redirect('/legal/terms'));
 app.get('/privacy', (c) => c.redirect('/legal/privacy'));
 
 // ---------- auth ----------
+// Global rate limit on all auth endpoints: 10 requests/minute per IP.
+app.use('/api/auth*', async (c, next) => {
+  const rl = authRateLimit(c);
+  if (rl) return rl;
+  await next();
+});
+
 app.post('/api/auth/signup', async (c) => {
   const ip = c.req.raw.headers.get('CF-Connecting-IP') || 'unknown';
   if (!rateLimit(`signup:${ip}`)) return c.json({ error: 'Too many attempts. Please wait a minute and try again.' }, 429);
