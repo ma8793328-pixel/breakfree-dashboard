@@ -1843,7 +1843,7 @@ app.get('/api/admin/users', async (c) => {
   if (!u) return c.json({ error: 'Not authenticated' }, 401);
   if (u.role !== 'admin') return c.json({ error: 'Admin access required.' }, 403);
   const q = (c.req.query('q') || '').trim().toLowerCase();
-  const sql = `SELECT id, email, role, created_at FROM users ${q ? 'WHERE lower(email) LIKE ?' : ''} ORDER BY id DESC LIMIT 100`;
+  const sql = `SELECT id, email, role FROM users ${q ? 'WHERE lower(email) LIKE ?' : ''} ORDER BY id DESC LIMIT 100`;
   const stmt = c.env.DB.prepare(sql);
   const rows = q ? await stmt.bind(`%${q}%`).all() : await stmt.all();
   return c.json({ users: rows.results });

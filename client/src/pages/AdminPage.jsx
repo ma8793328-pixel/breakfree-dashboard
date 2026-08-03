@@ -802,7 +802,7 @@ export default function AdminPage() {
                     {u.email}
                     {u.role === 'admin' && <span className="badge-pill ok" style={{ marginLeft: 6, fontSize: 10 }}>ADMIN</span>}
                   </div>
-                  <div className="meta">ID: {u.id} · Joined: {new Date(u.created_at + 'Z').toLocaleDateString()}</div>
+                  <div className="meta">ID: {u.id}</div>
                 </div>
                 <div className="row" style={{ gap: 4, flexShrink: 0 }}>
                   {u.role !== 'admin' ? (
