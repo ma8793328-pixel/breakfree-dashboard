@@ -160,31 +160,33 @@ function publicUser(u) {
   return { id: u.id, email: u.email, role: u.role };
 }
 
-// In-memory rate limiter: key → [timestamps]. Cleans up old entries on each call.
-const RATE_LIMITS = new Map();
+// D1-backed rate limiter: persistent across Worker instances.
 const RATE_WINDOW_MS = 60 * 1000;
 const RATE_MAX = 10;
 
-function rateLimit(key) {
+async function rateLimit(env, key) {
   const now = Date.now();
-  const entries = RATE_LIMITS.get(key) || [];
-  const recent = entries.filter((t) => now - t < RATE_WINDOW_MS);
-  if (recent.length >= RATE_MAX) return false;
-  recent.push(now);
-  RATE_LIMITS.set(key, recent);
+  const row = await env.DB.prepare('SELECT count, window_start FROM rate_limits WHERE key = ?').bind(key).first();
+  if (row && now - row.window_start < RATE_WINDOW_MS) {
+    if (row.count >= RATE_MAX) return false;
+    await env.DB.prepare('UPDATE rate_limits SET count = count + 1 WHERE key = ?').bind(key).run();
+    return true;
+  }
+  await env.DB.prepare('INSERT INTO rate_limits (key, count, window_start) VALUES (?, 1, ?) ON CONFLICT(key) DO UPDATE SET count = 1, window_start = excluded.window_start').bind(key, now).run();
   return true;
 }
 
 function authRateLimit(c) {
   const ip = c.req.raw.headers.get('CF-Connecting-IP') || 'unknown';
-  if (!rateLimit(`auth:${ip}`)) return c.json({ error: 'Too many attempts. Please wait a minute and try again.' }, 429);
-  return null;
+  return rateLimit(c.env, `auth:${ip}`).then((allowed) => {
+    if (!allowed) return c.json({ error: 'Too many attempts. Please wait a minute and try again.' }, 429);
+    return null;
+  });
 }
 
 // Global rate limit on all auth endpoints: 10 requests/minute per IP.
 app.use('/api/auth/*', async (c, next) => {
-  c.res.headers.append('X-RateLimit-Test', '1');
-  const rl = authRateLimit(c);
+  const rl = await authRateLimit(c);
   if (rl) return rl;
   await next();
 });
@@ -261,7 +263,7 @@ app.use('/api/auth*', async (c, next) => {
 
 app.post('/api/auth/signup', async (c) => {
   const ip = c.req.raw.headers.get('CF-Connecting-IP') || 'unknown';
-  if (!rateLimit(`signup:${ip}`)) return c.json({ error: 'Too many attempts. Please wait a minute and try again.' }, 429);
+  if (!(await rateLimit(c.env, `signup:${ip}`))) return c.json({ error: 'Too many attempts. Please wait a minute and try again.' }, 429);
   const { email, password } = await c.req.json().catch(() => ({}));
   if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return c.json({ error: 'Please enter a valid email address.' }, 400);
   if (!password || password.length < 8) return c.json({ error: 'Password must be at least 8 characters.' }, 400);
@@ -292,7 +294,7 @@ app.post('/api/auth/signup', async (c) => {
 
 app.post('/api/auth/login', async (c) => {
   const ip = c.req.raw.headers.get('CF-Connecting-IP') || 'unknown';
-  if (!rateLimit(`login:${ip}`)) return c.json({ error: 'Too many attempts. Please wait a minute and try again.' }, 429);
+  if (!(await rateLimit(c.env, `login:${ip}`))) return c.json({ error: 'Too many attempts. Please wait a minute and try again.' }, 429);
   const { email, password, rememberMe } = await c.req.json().catch(() => ({}));
   if (!email || !password) return c.json({ error: 'Email and password are required.' }, 400);
   const user = await c.env.DB.prepare('SELECT * FROM users WHERE email = ?').bind(String(email).toLowerCase()).first();
