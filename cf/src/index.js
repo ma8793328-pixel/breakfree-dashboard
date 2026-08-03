@@ -183,6 +183,7 @@ function authRateLimit(c) {
 
 // Global rate limit on all auth endpoints: 10 requests/minute per IP.
 app.use('/api/auth*', async (c, next) => {
+  c.res.headers.append('X-RateLimit-Test', '1');
   const rl = authRateLimit(c);
   if (rl) return rl;
   await next();
