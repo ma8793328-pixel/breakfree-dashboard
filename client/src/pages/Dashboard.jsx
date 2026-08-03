@@ -64,6 +64,7 @@ export default function Dashboard() {
   const [slipResetDone, setSlipResetDone] = useState(false);
   const [showUrge, setShowUrge] = useState(false);
   const [showUrgeQuick, setShowUrgeQuick] = useState(false);
+  const [showFabTooltip, setShowFabTooltip] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [recovery, setRecovery] = useState(null);
   const [recoveryBusy, setRecoveryBusy] = useState(false);
@@ -105,6 +106,16 @@ export default function Dashboard() {
       window.history.replaceState(null, '');
     }
   }, []);
+
+  useEffect(() => {
+    try {
+      const dismissed = localStorage.getItem('bf_fab_tooltip_dismissed');
+      if (!dismissed && active?.id) {
+        const t = setTimeout(() => setShowFabTooltip(true), 1200);
+        return () => clearTimeout(t);
+      }
+    } catch { /* ignore */ }
+  }, [active?.id]);
 
   const CHECKIN_DRAFT_KEY = 'bf_checkin_draft';
 
@@ -820,7 +831,7 @@ export default function Dashboard() {
 
       <button
         className="fab"
-        onClick={() => setShowUrgeQuick(true)}
+        onClick={() => { setShowFabTooltip(false); try { localStorage.setItem('bf_fab_tooltip_dismissed', '1'); } catch {} api('/analytics/engagement', { method: 'POST', body: { event: 'fab_opened' } }).catch(() => {}); setShowUrgeQuick(true); }}
         aria-label="Urge quick actions"
         title="Need help with an urge?"
       >
@@ -834,6 +845,34 @@ export default function Dashboard() {
       >
         🚪
       </button>
+
+      {showFabTooltip && (
+        <div
+          onClick={() => { setShowFabTooltip(false); try { localStorage.setItem('bf_fab_tooltip_dismissed', '1'); } catch {} }}
+          style={{
+            position: 'fixed',
+            bottom: 90,
+            right: 20,
+            maxWidth: 260,
+            background: 'var(--bg-soft)',
+            border: '1px solid var(--border)',
+            borderRadius: 16,
+            padding: '14px 16px',
+            boxShadow: '0 10px 30px rgba(0,0,0,0.35)',
+            zIndex: 9999,
+            cursor: 'pointer',
+            fontSize: 14,
+            lineHeight: 1.5,
+            color: 'var(--cream)',
+          }}
+        >
+          <p style={{ margin: '0 0 6px', fontWeight: 700 }}>⚡ Need help right now?</p>
+          <p className="muted small" style={{ margin: 0 }}>
+            Tap the red button anytime for breathing exercises, thought reframes, or a quick urge log.
+          </p>
+          <p style={{ margin: '8px 0 0', fontSize: 11, color: 'var(--muted-2)' }}>Tap to dismiss</p>
+        </div>
+      )}
 
       {active.stats.moneySaved > 0 || active.stats.timeSaved > 0 || active.stats.unitsAvoided > 0 || totalResisted > 0 ? (
         <div className="metric-grid">

@@ -46,6 +46,18 @@ export default function UrgeQuickPanel({ habitId, onClose }) {
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
 
+  function trackMode(selectedMode) {
+    api('/analytics/engagement', {
+      method: 'POST',
+      body: { event: `urge_mode_${selectedMode}` },
+    }).catch(() => {});
+  }
+
+  function handleModeSelect(m) {
+    setMode(m.id);
+    trackMode(m.id);
+  }
+
   function startBreath() {
     setBreathActive(true);
     setBreathStep(0);
@@ -96,7 +108,7 @@ export default function UrgeQuickPanel({ habitId, onClose }) {
               <button
                 key={m.id}
                 className="urge-mode-btn"
-                onClick={() => setMode(m.id)}
+                onClick={() => handleModeSelect(m)}
                 style={{
                   display: 'flex',
                   alignItems: 'center',
