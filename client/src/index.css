@@ -2821,7 +2821,7 @@ a {
   font-family: var(--font-head);
   font-weight: 900;
   font-size: 13px;
-  color: var(--accent);
+  color: var(--accent-strong);
   letter-spacing: 0.08em;
 }
 
