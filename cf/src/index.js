@@ -163,7 +163,7 @@ function publicUser(u) {
 // In-memory rate limiter: key → [timestamps]. Cleans up old entries on each call.
 const RATE_LIMITS = new Map();
 const RATE_WINDOW_MS = 60 * 1000;
-const RATE_MAX = 10;
+const RATE_MAX = 2;
 
 function rateLimit(key) {
   const now = Date.now();
