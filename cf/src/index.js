@@ -178,7 +178,9 @@ function rateLimit(key) {
 // Global rate limit on all auth endpoints: 10 requests/minute per IP.
 app.use('/api/auth/*', async (c, next) => {
   const ip = c.req.raw.headers.get('CF-Connecting-IP') || 'unknown';
-  if (!rateLimit(`auth:${ip}`)) return c.json({ error: 'Too many attempts. Please wait a minute and try again.' }, 429);
+  const allowed = rateLimit(`auth:${ip}`);
+  console.log(`[rate limit] auth:${ip} allowed=${allowed} path=${c.req.url}`);
+  if (!allowed) return c.json({ error: 'Too many attempts. Please wait a minute and try again.' }, 429);
   await next();
 });
 
