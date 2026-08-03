@@ -121,6 +121,13 @@ export default function LandingPage() {
         </div>
       </header>
 
+      <div className="landing-sticky-cta">
+        <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--cream)' }}>
+          ✅ Always Free · No Credit Card.
+        </span>
+        <Link className="btn btn-primary btn-sm" to="/signup">Sign Up</Link>
+      </div>
+
       <section className="landing-hero">
         <p className="hero-kicker">Break any habit · one day at a time</p>
         <h1 className="landing-title">
@@ -209,8 +216,8 @@ export default function LandingPage() {
             <div className="landing-coach" aria-label="Example coach message">
               <span className="landing-coach-avatar">🧑‍🏫</span>
               <p className="landing-coach-bubble">
-                Coach: “Day 4 is tough — but your resting heart rate is already coming down
-                and you've saved £X this week. Try the 2-minute breathing exercise.”
+                Coach: "Day 4 is tough — but your resting heart rate is already coming down
+                and you've saved £142 this week. Try the 2-minute breathing exercise."
               </p>
             </div>
             </div>
@@ -220,6 +227,14 @@ export default function LandingPage() {
             </div>
             <HealingChart />
           </div>
+          <p className="muted small" style={{ marginTop: 16, fontSize: 12 }}>
+            Sources: Day 3–7 withdrawal timeline based on NHS smoking cessation guidelines and
+            public health data. See{' '}
+            <a href="https://www.nhs.uk/live-well/quit-smoking/" target="_blank" rel="noreferrer" className="inlink">
+              NHS Quit Smoking
+            </a>{' '}
+            for details.
+          </p>
       </section>
 
       <section className="landing-section" id="features">
@@ -239,10 +254,9 @@ export default function LandingPage() {
         <h2 className="landing-h2">Real stories are on the way</h2>
         <div className="landing-testimonials-soon">
           <p className="landing-sub landing-sub-narrow">
-            We're collecting honest stories from our community — the wins, the slips, the day-4
-            walls crossed. Be one of the first to share yours.
+            Your story could save someone else. Be the first to share yours.
           </p>
-          <Link className="btn btn-primary" to="/signup">Start your story</Link>
+          <Link className="btn btn-primary" to="/signup">Share your story</Link>
         </div>
       </section>
 
