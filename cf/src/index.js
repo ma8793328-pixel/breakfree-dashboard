@@ -31,9 +31,14 @@ const ALLOWED_ORIGINS = [
 ];
 
 app.use('/api/*', cors({
-  origin: (origin, cb) => cb(null, !origin || ALLOWED_ORIGINS.includes(origin)),
+  origin: (origin) => (!origin || ALLOWED_ORIGINS.includes(origin) ? origin : null),
   credentials: true,
 }));
+
+app.onError((err, c) => {
+  console.error('unhandled error:', err?.stack || err);
+  return c.json({ error: 'Internal server error' }, 500);
+});
 
 // Security headers on every response.
 app.use('*', async (c, next) => {
@@ -1878,13 +1883,18 @@ app.get('*', async (c) => {
 });
 
 async function ensureAdmin(env) {
-  const em = String(env.ADMIN_EMAIL || 'admin@breakfree.app').toLowerCase();
+  const em = String(env.ADMIN_EMAIL || '').toLowerCase().trim();
+  const pw = String(env.ADMIN_PASSWORD || '');
+  if (!em || !pw) {
+    console.warn('ensureAdmin: ADMIN_EMAIL/ADMIN_PASSWORD not configured — skipping admin seed.');
+    return;
+  }
   const existing = await env.DB.prepare('SELECT id FROM users WHERE email = ?').bind(em).first();
   if (existing) {
     if (existing.role !== 'admin') await env.DB.prepare('UPDATE users SET role = ? WHERE email = ?').bind('admin', em).run();
     return;
   }
-  const hash = await hashPassword(env.ADMIN_PASSWORD || 'admin12345');
+  const hash = await hashPassword(pw);
   await env.DB.prepare('INSERT INTO users (email, password_hash, role) VALUES (?, ?, ?)').bind(em, hash, 'admin').run();
 }
 
@@ -2073,27 +2083,29 @@ async function sendScheduledNudges(env) {
 // visible on the next read).
 function strongDB(db) {
   const prepare = db.prepare.bind(db);
+  const wrapStmt = (stmt) => new Proxy(stmt, {
+    get(s, method, recv) {
+      if (method === 'bind') {
+        // D1's Statement.bind() is immutable: it returns a NEW bound statement
+        // and leaves the original unmodified, so we must wrap the returned one.
+        return (...args) => wrapStmt(s.bind(...args));
+      }
+      if (method === 'all' || method === 'run' || method === 'raw' || method === 'count') {
+        return (...args) => s[method](...args, { consistency: 'strong' });
+      }
+      // D1's first(column?, options?) treats the first argument as a column
+      // name, so an options object alone would be misread as `[object Object]`.
+      if (method === 'first') {
+        return (...args) => s.first(...(args.length ? args : [undefined]), { consistency: 'strong' });
+      }
+      const val = s[method];
+      return typeof val === 'function' ? val.bind(s) : val;
+    },
+  });
   return new Proxy(db, {
     get(target, prop, receiver) {
       if (prop === 'prepare') {
-        return (sql) => {
-          const stmt = prepare(sql);
-          return new Proxy(stmt, {
-            get(s, method, recv) {
-              if (method === 'bind') {
-                return (...args) => {
-                  s.bind(...args);
-                  return recv;
-                };
-              }
-              if (method === 'all' || method === 'first' || method === 'run' || method === 'raw' || method === 'count') {
-                return (...args) => s[method](...args, { consistency: 'strong' });
-              }
-              const val = s[method];
-              return typeof val === 'function' ? val.bind(s) : val;
-            },
-          });
-        };
+        return (sql) => wrapStmt(prepare(sql));
       }
       const val = Reflect.get(target, prop);
       return typeof val === 'function' ? val.bind(target) : val;

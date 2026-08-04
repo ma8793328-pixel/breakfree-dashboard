@@ -47,6 +47,8 @@ async function signToken(userId) {
   return new SignJWT({ role: 'user', email: 'tester@example.com' })
     .setProtectedHeader({ alg: 'HS256' })
     .setSubject(String(userId))
+    .setIssuer('breakfree')
+    .setAudience('breakfree-api')
     .setIssuedAt()
     .setExpirationTime('1h')
     .sign(new TextEncoder().encode(JWT_SECRET));

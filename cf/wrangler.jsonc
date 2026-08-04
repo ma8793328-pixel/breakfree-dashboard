@@ -22,8 +22,11 @@
     "binding": "AI"
   },
   "vars": {
-    "ADMIN_EMAIL": "admin@breakfree.app",
-    "ADMIN_PASSWORD": "admin12345"
+    // ADMIN_EMAIL / ADMIN_PASSWORD are intentionally NOT stored here.
+    // Set them AFTER first deploy, before the admin account is seeded:
+    //   npx wrangler secret put ADMIN_EMAIL
+    //   npx wrangler secret put ADMIN_PASSWORD
+    // Never ship a default admin password to production.
   },
   "triggers": {
     "crons": ["0 * * * *"]
