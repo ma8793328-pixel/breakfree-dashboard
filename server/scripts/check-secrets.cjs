@@ -16,9 +16,11 @@ if (onDrive) {
     process.exit(1);
   }
 }
+const dbDir = path.dirname(dbPath);
+if (!fs.existsSync(dbDir)) fs.mkdirSync(dbDir, { recursive: true });
 try {
-  fs.writeFileSync(`${path.dirname(dbPath)}/.onedrive-test`, 'ok');
-  fs.unlinkSync(`${path.dirname(dbPath)}/.onedrive-test`);
+  fs.writeFileSync(`${dbDir}/.onedrive-test`, 'ok');
+  fs.unlinkSync(`${dbDir}/.onedrive-test`);
 } catch (e) {
   console.error('❌ Data folder locked by OneDrive Files On-Demand — set "Always keep on this device"');
   process.exit(1);
