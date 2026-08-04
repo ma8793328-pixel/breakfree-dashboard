@@ -6,28 +6,11 @@ import { mkdirSync, readdirSync, unlinkSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { db, indexJournal, DATA_DIR } from './db.js';
-import { BADGE_THRESHOLDS, computeStats, todayKey, addDays } from './stats.js';
 import {
-  PRICE_CENTS,
-  FREE_HABIT_LIMIT,
-  createCheckoutSession,
-  completeCheckout,
-  activateSubscription,
-  startTrial,
-  cancelSubscription,
-  publicSubscription,
-} from './billing.js';
-import {
-  stripeConfigured,
-  createCheckout,
-  retrieveSession,
-  cancelStripeSubscription,
-  verifyWebhookSignature,
-} from './stripe.js';
-import { registerAiRoutes } from './ai.js';
+  registerAiRoutes,
+} from './ai.js';
 import { registerCommunityRoutes } from './community.js';
 import { registerAdminRoutes } from './admin.js';
-import { registerPremiumRoutes } from './premium.js';
 import { registerPushRoutes, notifyLowSleep, notifyUrgeTip, notifyMilestone, cleanupStaleSubscriptions, DEFAULT_PREFS, prefsFor, scheduleTriggerNudge, sweepTriggerNudges } from './push.js';
 import { findNearby, geocodeArea, GENERIC_IDEAS } from './daysout.js';
 import { evaluateUserEngagement, evaluateAllEngagement } from './engage.js';
@@ -54,9 +37,6 @@ const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin12345';
 
 const app = express();
 app.use(cors());
-// Stripe webhooks need the raw body for signature verification — parse it
-// before the global JSON middleware consumes the stream.
-app.use('/api/stripe/webhook', express.raw({ type: 'application/json' }));
 app.use(express.json());
 
 // ---------- Auth helpers ----------
@@ -166,6 +146,69 @@ function habitPayload(habit) {
   };
 }
 
+// ---------- Legal (Terms & Privacy) ----------
+
+const TERMS_TEXT = `BreakFree Terms of Service
+
+1. Eligibility
+You must be 18 or older to create an account and use BreakFree.
+
+2. Not medical advice
+BreakFree is a self-help tool. It is not a substitute for professional medical, psychological, or addiction treatment. If you are in crisis, contact a healthcare provider or emergency services.
+
+3. Your account
+You are responsible for keeping your login details secure. You may delete your account at any time from Settings.
+
+4. User content
+You retain ownership of the data you create (check-ins, journals, etc.). BreakFree does not claim any rights over your content.
+
+5. Acceptable use
+Do not use the service to harm yourself or others, or to share harmful or illegal content. Community posts are moderated.
+
+6. Limitation of liability
+BreakFree is provided "as is" without warranties. We are not liable for any loss or damage arising from use of the service.
+
+7. Changes
+We may update these terms occasionally. Continued use after changes constitutes acceptance.
+
+8. Contact
+support@breakfree.app`;
+
+const PRIVACY_TEXT = `BreakFree Privacy Policy
+
+What we collect
+- Account: email address, password hash (bcrypt), account creation date.
+- Habit data: habit names, start dates, check-in status (clean/slip), daily wellness ratings (energy, sleep, mood), urges, journal entries, health samples (steps, sleep hours, resting heart rate).
+- Community: posts, comments, reactions (if you choose to participate).
+- Technical: error logs, push subscription tokens (stored locally on your device), basic usage metrics.
+
+How we store it
+All data is stored in a local SQLite (D1) database on our server. Daily encrypted backups are retained for 14 days for disaster recovery. We do not use third-party cloud storage.
+
+What we don't do
+- We do not sell your data.
+- We do not share your data with advertisers or analytics companies.
+- We do not use third-party AI APIs. The AI coach runs partly on your device and partly on our server; your data stays within BreakFree.
+
+Your controls
+- Export: download everything in Settings (JSON export).
+- Delete: permanently delete your account and all data in Settings.
+- Privacy settings: control notification preferences in Settings.
+
+Children
+BreakFree is not intended for users under 18. We do not knowingly collect data from minors.
+
+Contact
+support@breakfree.app`;
+
+app.get('/legal/terms', (req, res) => {
+  res.json({ text: TERMS_TEXT });
+});
+
+app.get('/legal/privacy', (req, res) => {
+  res.json({ text: PRIVACY_TEXT });
+});
+
 // ---------- Auth ----------
 
 app.post('/api/auth/signup', (req, res) => {
@@ -184,7 +227,6 @@ app.post('/api/auth/signup', (req, res) => {
     .prepare('INSERT INTO users (email, password_hash) VALUES (?, ?)')
     .run(String(email).toLowerCase(), hash);
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(info.lastInsertRowid);
-  startTrial(user.id);
   res.status(201).json({ token: signToken(user), user: publicUser(user) });
 });
 
@@ -202,96 +244,6 @@ app.get('/api/auth/me', requireAuth, (req, res) => {
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
   if (!user) return res.status(404).json({ error: 'User not found.' });
   res.json({ user: publicUser(user) });
-});
-
-// ---------- Subscription (real Stripe Checkout, with simulated fallback) ----------
-
-// The success/cancel URLs must point at wherever the client is served. In
-// development that's the Vite dev server; in production it's this server.
-// Prefer an explicit APP_ORIGIN env var, else the browser's Origin header,
-// else the host the API was reached on.
-function appOrigin(req) {
-  return process.env.APP_ORIGIN || req.get('origin') || `${req.protocol}://${req.get('host')}`;
-}
-
-app.get('/api/subscription', requireAuth, (req, res) => {
-  res.json({ subscription: publicSubscription(req.user.id), price: PRICE_CENTS });
-});
-
-app.post('/api/subscription/checkout', requireAuth, async (req, res) => {
-  activateSubscription(req.user.id);
-  return res.json({ alreadyPremium: true, subscription: publicSubscription(req.user.id) });
-});
-
-app.post('/api/subscription/complete', requireAuth, async (req, res) => {
-  const { sessionId } = req.body || {};
-  if (stripeConfigured()) {
-    if (!sessionId || !String(sessionId).trim()) {
-      return res.status(400).json({ error: 'Missing session ID.' });
-    }
-    try {
-      // Verify the payment actually completed on Stripe before granting Premium.
-      const s = await retrieveSession(String(sessionId));
-      if (s.payment_status !== 'paid') {
-        return res.status(400).json({ error: 'Payment has not completed yet.' });
-      }
-      if (s.client_reference_id !== String(req.user.id)) {
-        return res.status(403).json({ error: 'Session does not match this account.' });
-      }
-      activateSubscription(req.user.id, { customer: s.customer, subscription: s.subscription });
-      return res.json({ subscription: publicSubscription(req.user.id) });
-    } catch (e) {
-      console.error('Stripe verification failed:', e.message);
-      return res.status(502).json({ error: 'Could not verify the payment.' });
-    }
-  }
-  const result = completeCheckout(req.user.id, sessionId);
-  if (!result.ok) return res.status(400).json({ error: result.error || 'Payment not completed.' });
-  res.json({ subscription: publicSubscription(req.user.id) });
-});
-
-app.post('/api/subscription/cancel', requireAuth, async (req, res) => {
-  if (stripeConfigured()) {
-    const row = db
-      .prepare("SELECT stripe_subscription_id FROM subscriptions WHERE user_id = ? AND plan = 'premium' AND status = 'active'")
-      .get(req.user.id);
-    if (row?.stripe_subscription_id) await cancelStripeSubscription(row.stripe_subscription_id);
-  }
-  cancelSubscription(req.user.id);
-  res.json({ subscription: publicSubscription(req.user.id) });
-});
-
-// Stripe webhook: activate on checkout completion, downgrade on cancel.
-app.post('/api/stripe/webhook', async (req, res) => {
-  const rawBody = Buffer.isBuffer(req.body) ? req.body.toString('utf8') : String(req.body || '');
-  const okSig = await verifyWebhookSignature(rawBody, req.get('stripe-signature'));
-  if (!okSig) return res.status(400).json({ error: 'Invalid signature.' });
-  let event;
-  try {
-    event = JSON.parse(rawBody);
-  } catch {
-    return res.status(400).json({ error: 'Invalid payload.' });
-  }
-  try {
-    if (event.type === 'checkout.session.completed') {
-      const s = event.data.object;
-      const userId = Number(s.client_reference_id);
-      if (userId && s.payment_status === 'paid') {
-        activateSubscription(userId, { customer: s.customer, subscription: s.subscription });
-      }
-    } else if (event.type === 'customer.subscription.deleted') {
-      const sub = event.data.object;
-      if (sub?.metadata?.user_id) {
-        const uid = Number(sub.metadata.user_id);
-        db.prepare("UPDATE subscriptions SET status = 'cancelled' WHERE user_id = ?").run(uid);
-      } else {
-        db.prepare('UPDATE subscriptions SET status = ? WHERE stripe_subscription_id = ?').run('cancelled', sub.id);
-      }
-    }
-  } catch (e) {
-    console.error('Webhook handler failed:', e.message);
-  }
-  res.json({ received: true });
 });
 
 // ---------- Habits ----------
@@ -598,11 +550,7 @@ registerAiRoutes(app, { requireAuth, habitForUser: getHabitForUser });
 
 // ---------- Community ----------
 
-  registerCommunityRoutes(app, { requireAuth, requireAdmin, habitForUser: getHabitForUser });
-
-// ---------- Premium features ----------
-
-registerPremiumRoutes(app, { requireAuth, habitForUser: getHabitForUser });
+registerCommunityRoutes(app, { requireAuth, requireAdmin, habitForUser: getHabitForUser });
 
 // ---------- Admin routes ----------
 

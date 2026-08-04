@@ -417,7 +417,7 @@ export default function AdminPage() {
           </div>
           <div className="metric-grid" style={{ gridTemplateColumns: 'repeat(3, 1fr)' }}>
             <StatCard label="Uptime" value={uptimeDisplay} sub="since last deploy" />
-            <StatCard label="Total users" value={status.counts.users} sub={`${status.premiumUsers} premium${status.trialUsers > 0 ? ` · ${status.trialUsers} trial` : ''}`} />
+            <StatCard label="Total users" value={status.counts.users} sub="🌍 100% free — no paid tiers" />
             <StatCard label="Errors (24h)" value={status.errors24h} accent={status.errors24h > 0 ? 'var(--slip)' : undefined} />
             <StatCard label="Check-ins today" value={status.today?.checkins || 0} accent="var(--sage)" />
             <StatCard label="Urges logged today" value={status.today?.urges || 0} accent="var(--accent-strong)" />

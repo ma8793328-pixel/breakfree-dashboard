@@ -889,12 +889,6 @@ a {
   color: var(--slip);
 }
 
-.badge-pill.premium {
-  background: rgba(229, 9, 20, 0.16);
-  color: var(--accent-strong);
-  border: 1px solid rgba(229, 9, 20, 0.4);
-}
-
 /* ---------- Misc ---------- */
 
 .row {
@@ -1610,110 +1604,6 @@ a {
   font-size: 14px;
   line-height: 1.55;
   color: var(--cream);
-}
-
-/* ---------- Premium page ---------- */
-
-.premium-hero {
-  background:
-    radial-gradient(300px 200px at 85% -10%, rgba(229, 9, 20, 0.32), transparent 70%),
-    linear-gradient(160deg, #2A1215 0%, #160B0D 100%);
-  border: 1px solid rgba(229, 9, 20, 0.45);
-  border-radius: 24px;
-  padding: 28px 22px;
-  text-align: center;
-  box-shadow: var(--shadow);
-  position: relative;
-  overflow: hidden;
-}
-
-.premium-hero::before {
-  content: '';
-  position: absolute;
-  top: -70px;
-  left: 50%;
-  transform: translateX(-50%);
-  width: 260px;
-  height: 260px;
-  background: radial-gradient(circle, rgba(229, 9, 20, 0.28), transparent 70%);
-  border-radius: 50%;
-}
-
-.ph-badge {
-  font-size: 52px;
-  animation: float 2.6s ease-in-out infinite;
-  position: relative;
-}
-
-.ph-title {
-  font-family: var(--font-head);
-  font-size: 22px;
-  font-weight: 900;
-  color: var(--cream);
-  margin-top: 8px;
-  position: relative;
-}
-
-.ph-sub {
-  color: var(--muted);
-  font-size: 14px;
-  margin-top: 6px;
-  position: relative;
-}
-
-.ph-price {
-  display: flex;
-  align-items: baseline;
-  justify-content: center;
-  gap: 6px;
-  margin-top: 14px;
-  position: relative;
-}
-
-.ph-amount {
-  font-family: var(--font-head);
-  font-size: 42px;
-  font-weight: 900;
-  color: var(--accent);
-}
-
-.ph-per {
-  color: var(--muted);
-  font-size: 14px;
-  font-weight: 700;
-}
-
-.perk-list {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.perk {
-  display: flex;
-  gap: 14px;
-  align-items: flex-start;
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 14px 16px;
-}
-
-.perk-icon {
-  font-size: 26px;
-  line-height: 1.2;
-}
-
-.perk-title {
-  font-family: var(--font-head);
-  font-weight: 800;
-  font-size: 15px;
-}
-
-.perk-text {
-  color: var(--muted);
-  font-size: 13px;
-  margin-top: 2px;
 }
 
 /* ---------- Dashboard menu ---------- */

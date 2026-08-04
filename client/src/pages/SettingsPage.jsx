@@ -319,6 +319,26 @@ export default function SettingsPage() {
         </div>
         <span className="help-arrow">→</span>
       </Link>
+
+      <a href="/terms" className="card help-link" target="_blank" rel="noopener noreferrer">
+        <div>
+          <p className="settings-title">📄 Terms of Service</p>
+          <p className="muted small" style={{ marginTop: 2 }}>
+            Read the BreakFree terms and conditions.
+          </p>
+        </div>
+        <span className="help-arrow">→</span>
+      </a>
+
+      <a href="/privacy" className="card help-link" target="_blank" rel="noopener noreferrer">
+        <div>
+          <p className="settings-title">🔒 Privacy Policy</p>
+          <p className="muted small" style={{ marginTop: 2 }}>
+            What we collect, how we store it, and your rights.
+          </p>
+        </div>
+        <span className="help-arrow">→</span>
+      </a>
     </Layout>
   );
 }

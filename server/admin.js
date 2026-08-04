@@ -1,7 +1,6 @@
 import { db } from './db.js';
 import { computeStats, BADGE_THRESHOLDS, todayKey, addDays } from './stats.js';
 import { checkHealth as checkOpenAI } from './openai.js';
-import { activateSubscription } from './billing.js';
 
 const PORT = process.env.PORT || 4000;
 
@@ -76,19 +75,7 @@ export async function runHealthCheck() {
     });
   }
 
-  // 5. Subscriptions — active but past renewal (would flag a missing renewal job)
-  {
-    const overdue = count(
-      `SELECT COUNT(*) AS c FROM subscriptions WHERE status = 'active' AND renews_at IS NOT NULL AND renews_at < datetime('now')`
-    );
-    checks.push({
-      name: 'Subscriptions',
-      ok: overdue === 0,
-      detail: overdue === 0 ? 'No overdue active subscriptions' : `${overdue} active subscription(s) past renewal date`,
-    });
-  }
-
-  // 6. Recent errors
+  // 5. Recent errors
   {
     const recent = count(`SELECT COUNT(*) AS c FROM app_errors WHERE created_at > datetime('now', '-24 hours')`);
     checks.push({
@@ -160,10 +147,9 @@ export function registerAdminRoutes(app, { requireAuth, requireAdmin }) {
   });
 
   app.get('/api/admin/status', requireAuth, requireAdmin, (req, res) => {
-    const tables = ['users', 'habits', 'checkins', 'urges', 'journals', 'badges', 'subscriptions', 'app_errors'];
+    const tables = ['users', 'habits', 'checkins', 'urges', 'journals', 'badges', 'app_errors'];
     const counts = {};
     for (const t of tables) counts[t] = count(`SELECT COUNT(*) AS c FROM ${t}`);
-    const premium = count(`SELECT COUNT(*) AS c FROM subscriptions WHERE plan = 'premium' AND status = 'active'`);
     const errors24h = count(`SELECT COUNT(*) AS c FROM app_errors WHERE created_at > datetime('now', '-24 hours')`);
     const metaRows = {};
     for (const r of db.prepare("SELECT key, value FROM meta WHERE key IN ('nudges_last_run','nudges_last_sent','nudges_sent')").all()) {
@@ -180,7 +166,6 @@ export function registerAdminRoutes(app, { requireAuth, requireAdmin }) {
       uptime: Math.round(process.uptime()),
       startedAt: new Date(Date.now() - process.uptime() * 1000).toISOString(),
       counts,
-      premiumUsers: premium,
       errors24h,
       notifications: {
         lastRun: metaRows.nudges_last_run || null,
@@ -207,16 +192,5 @@ export function registerAdminRoutes(app, { requireAuth, requireAdmin }) {
     } catch (e) {
       res.status(500).json({ healthy: false, summary: String(e.message), checks: [], suggestions: [] });
     }
-  });
-
-  app.post('/api/admin/grant-premium', requireAuth, requireAdmin, async (req, res) => {
-    const { userId, days = 30 } = req.body || {};
-    const targetId = Number(userId);
-    if (!targetId) return res.status(400).json({ error: 'userId is required.' });
-    const target = db.prepare('SELECT id, email FROM users WHERE id = ?').get(targetId);
-    if (!target) return res.status(404).json({ error: 'User not found.' });
-    activateSubscription(targetId);
-    const sub = db.prepare('SELECT plan, status, renews_at FROM subscriptions WHERE user_id = ?').get(targetId);
-    res.json({ ok: true, user: { id: target.id, email: target.email }, subscription: sub });
   });
 }
