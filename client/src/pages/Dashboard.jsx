@@ -876,14 +876,6 @@ export default function Dashboard() {
           🆘
         </button>
       )}
-      <button
-        className="fab fab-exit"
-        onClick={() => window.open('https://www.google.com', '_blank')}
-        aria-label="Quick exit — opens a neutral page"
-        title="Quick exit"
-      >
-        🚪
-      </button>
 
       {showFabTooltip && (
         <div
