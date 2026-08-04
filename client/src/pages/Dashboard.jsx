@@ -14,7 +14,7 @@ import Badge from '../components/Badge.jsx';
 import { usePushNotifications, scheduleTriggerNudges } from '../usePushNotifications.js';
 import { queueOffline, flushOfflineQueue } from '../offline.js';
 
-function RatingRow({ label, value, onChange, accentColor, lowEnd = 'Low', highEnd = 'High' }) {
+function RatingRow({ label, value, onChange, accentColor, lowEnd: _lowEnd = 'Low', highEnd: _highEnd = 'High' }) {
   const ids = [1, 2, 3, 4, 5];
   const getFeedback = () => {
     const tips = {
@@ -26,53 +26,28 @@ function RatingRow({ label, value, onChange, accentColor, lowEnd = 'Low', highEn
   };
 
   return (
-    <div
-      className="rating-row"
-      role="radiogroup"
-      aria-label={`${label}, from ${lowEnd} to ${highEnd}`}
-      onKeyDown={(e) => {
-        const i = ids.indexOf(value);
-        let next = null;
-        if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') next = ids[Math.max(0, i - 1)];
-        else if (e.key === 'ArrowRight' || e.key === 'ArrowDown') next = ids[Math.min(4, i + 1)];
-        else if (e.key === 'Home') next = 1;
-        else if (e.key === 'End') next = 5;
-        if (next != null) {
-          e.preventDefault();
-          onChange(next);
-        }
-      }}
-    >
-      <div className="rating-header">
-        <span className="rating-label">{label}</span>
-        <span className="rating-value" style={{ color: accentColor }}>{value}/5</span>
+    <div className="rating-row">
+      <span className="rating-label">{label}</span>
+      <div className="rating-buttons">
+        {ids.map((score) => (
+          <button
+            key={score}
+            className={`rating-btn ${value >= score ? "active" : ""}`}
+            style={{
+              borderColor: value >= score ? accentColor : "#3a3a3a",
+              backgroundColor: value >= score ? accentColor : "transparent",
+              color: value >= score ? "#000" : "#888"
+            }}
+            onClick={() => onChange(score)}
+            aria-label={`${label} ${score} of 5`}
+          >
+            {score}
+          </button>
+        ))}
       </div>
-      <div className="rating-controls">
-        <span className="scale-label">{lowEnd}</span>
-        <div className="rating-buttons">
-          {ids.map((score) => (
-            <button
-              key={score}
-              type="button"
-              role="radio"
-              aria-checked={value === score}
-              aria-label={`${label}: ${score} of 5`}
-              className={`rating-btn${value >= score ? ' active' : ''}`}
-              tabIndex={value === score ? 0 : -1}
-              style={{
-                borderColor: value >= score ? accentColor : undefined,
-                backgroundColor: value >= score ? accentColor : undefined,
-                boxShadow: value >= score ? `0 0 10px ${accentColor}40` : undefined
-              }}
-              onClick={() => onChange(score)}
-            >
-              {score}
-            </button>
-          ))}
-        </div>
-        <span className="scale-label">{highEnd}</span>
-      </div>
-      <span className="rating-feedback" style={{ color: accentColor }}>{getFeedback()}</span>
+      <span className="rating-feedback" style={{ color: accentColor }}>
+        {getFeedback()}
+      </span>
     </div>
   );
 }
