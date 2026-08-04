@@ -10,6 +10,12 @@ const FIELDS = [
   { key: 'restingHr', label: 'Resting HR', type: 'number', min: 30, max: 220, placeholder: 'e.g. 62', suffix: 'bpm' },
 ];
 
+const QUICK_PRESETS = [
+  { label: '8k steps', key: 'steps', value: 8000 },
+  { label: '7.5h sleep', key: 'sleepHours', value: 7.5 },
+  { label: '62 bpm', key: 'restingHr', value: 62 },
+];
+
 function fmtDate(key) {
   const d = new Date(key + 'T00:00:00');
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
@@ -56,6 +62,46 @@ function StepsChart({ samples }) {
   );
 }
 
+function LineChart({ samples, key, color, label, unit, min, max }) {
+  const last = (samples || []).slice(-14).filter((s) => s[key] != null);
+  if (last.length === 0) return null;
+  const W = 320;
+  const H = 120;
+  const PAD_X = 8;
+  const PAD_Y = 10;
+  const vals = last.map((s) => s[key]);
+  const lo = min != null ? min : Math.min(...vals);
+  const hi = max != null ? max : Math.max(...vals);
+  const range = hi - lo || 1;
+  const x = (i) => PAD_X + (i / Math.max(last.length - 1, 1)) * (W - PAD_X * 2);
+  const y = (v) => H - PAD_Y - ((v - lo) / range) * (H - PAD_Y * 2);
+  const points = last.map((s, i) => `${x(i)},${y(s[key])}`).join(' ');
+  return (
+    <div className="trend-chart">
+      <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label={`${label} over the last two weeks`}>
+        {[0, 0.5, 1].map((v) => (
+          <line
+            key={v}
+            x1={PAD_X}
+            x2={W - PAD_X}
+            y1={PAD_Y + v * (H - PAD_Y * 2)}
+            y2={PAD_Y + v * (H - PAD_Y * 2)}
+            stroke="rgba(245,245,241,0.08)"
+            strokeWidth="1"
+          />
+        ))}
+        <polyline points={points} fill="none" stroke={color} strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
+        {last.map((s, i) => (
+          <circle key={s.date} cx={x(i)} cy={y(s[key])} r="4" fill={color} />
+        ))}
+      </svg>
+      <p className="muted tiny" style={{ marginTop: 4, textAlign: 'center' }}>
+        {label}: {vals[vals.length - 1]}{unit} (latest)
+      </p>
+    </div>
+  );
+}
+
 export default function HealthPage() {
   const { token } = useAuth();
   const { active } = useHabits();
@@ -96,6 +142,10 @@ export default function HealthPage() {
       n: days.length,
     };
   }, [samples]);
+
+  function applyPreset(preset) {
+    setForm((f) => ({ ...f, [preset.key]: String(preset.value) }));
+  }
 
   async function onSave(e) {
     e.preventDefault();
@@ -139,6 +189,19 @@ export default function HealthPage() {
 
       <div className="card">
         <p className="card-title">📋 Log today</p>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 12 }}>
+          {QUICK_PRESETS.map((p) => (
+            <button
+              key={p.key}
+              type="button"
+              className="chip"
+              onClick={() => applyPreset(p)}
+              aria-label={`Quick add ${p.label}`}
+            >
+              {p.label}
+            </button>
+          ))}
+        </div>
         <form onSubmit={onSave}>
           <div className="field">
             <label htmlFor="health-date">Date</label>
@@ -222,6 +285,8 @@ export default function HealthPage() {
         ) : (
           <>
             <StepsChart samples={recent} />
+            <LineChart samples={recent} key="sleepHours" color="var(--sage)" label="Sleep" unit=" h" min={0} max={12} />
+            <LineChart samples={recent} key="restingHr" color="var(--accent-strong)" label="Resting HR" unit=" bpm" min={40} max={100} />
             <div className="list" style={{ gap: 4, marginTop: 10 }}>
               {[...recent].reverse().map((s) => (
                 <div className="toggle-row" key={s.date} style={{ padding: '7px 0' }}>
