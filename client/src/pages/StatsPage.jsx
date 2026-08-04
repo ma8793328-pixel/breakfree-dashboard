@@ -1,11 +1,12 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Layout from '../components/Layout.jsx';
 import { useAuth } from '../auth.jsx';
 import { useHabits } from '../habits.jsx';
 import { useHabitDetail } from '../useHabitDetail.js';
 import Badge from '../components/Badge.jsx';
-import TrendChart from '../chartUtil.jsx';
+import TrendChart, { Sparkline } from '../chartUtil.jsx';
+import { fetchUrgeTrend } from '../api.js';
 import { correlationInsights } from '../aiCoach.js';
 import { MILESTONES, recoveryTimeline, unitLabel } from '../data.js';
 
@@ -94,6 +95,87 @@ function TriggerHeatmap({ urges }) {
         })}
       </div>
     </>
+  );
+}
+
+function UrgeTrendCard({ habitId, token }) {
+  const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    let alive = true;
+    setData(null);
+    setError(null);
+    if (!habitId || !token) return;
+    fetchUrgeTrend(habitId, 14, token)
+      .then((d) => {
+        if (alive) setData(d);
+      })
+      .catch((e) => {
+        if (alive) setError(e.message);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [habitId, token]);
+
+  if (error) {
+    return (
+      <div className="card">
+        <p className="card-title">📉 Urge trend</p>
+        <p className="muted small">Couldn't load the urge trend right now.</p>
+      </div>
+    );
+  }
+
+  if (!data) {
+    return (
+      <div className="card">
+        <p className="card-title">📉 Urge trend</p>
+        <div className="loading-screen" style={{ minHeight: '16vh' }}>
+          <div className="spinner" />
+        </div>
+      </div>
+    );
+  }
+
+  const values = data.series.map((p) => p.count);
+  const total = values.reduce((a, b) => a + b, 0);
+
+  let statusLine;
+  if (data.trend === 'improving') {
+    statusLine = 'Urges are trending down — that\u2019s real progress.';
+  } else if (data.trend === 'worsening') {
+    statusLine = 'Urges have crept up. Review your triggers and plan ahead.';
+  } else if (data.trend === 'stable') {
+    statusLine = 'Urge levels are holding steady.';
+  } else {
+    statusLine = 'Log a few urges over the next days to reveal your trend.';
+  }
+
+  return (
+    <div className="card">
+      <p className="card-title">📉 Urge trend</p>
+      <p className="muted small" style={{ marginBottom: 14 }}>
+        Daily urge count over the last {data.days} days.
+      </p>
+      {values.length > 0 ? (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+          <Sparkline values={values} color="#9B59B6" width={220} height={56} />
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <span className="muted small">{statusLine}</span>
+            {data.changePct != null && (
+              <span className="small" style={{ fontWeight: 600, color: data.changePct >= 0 ? '#A8C09A' : '#E09B7A' }}>
+                {data.changePct >= 0 ? '▼' : '▲'} {Math.abs(data.changePct)}% change in daily urge count
+              </span>
+            )}
+            <span className="muted small">Total urges logged: {total}</span>
+          </div>
+        </div>
+      ) : (
+        <p className="muted small">No urges logged yet.</p>
+      )}
+    </div>
   );
 }
 
@@ -587,6 +669,8 @@ export default function StatsPage() {
           <TrendChart data={dailyCheckins} />
         )}
       </div>
+
+      <UrgeTrendCard habitId={active?.id} token={token} />
 
       <div className="card">
         <TriggerHeatmap urges={detail?.urges} />

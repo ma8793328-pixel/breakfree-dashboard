@@ -34,6 +34,13 @@ function writeCoachCache(habitId, messages) {
   }
 }
 
+const CONTEXTUAL_QUICK_REPLIES = [
+  "I'm having an urge right now",
+  "Rough day",
+  "Good day",
+  "Tell me a strategy",
+];
+
 const OPENERS = [
   "I'm having an urge right now",
   'I had a win today',
@@ -72,7 +79,7 @@ export default function CoachPage() {
 
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
-  const [typing, setTyping] = useState(false);
+  const [isTyping, setIsTyping] = useState(false);
   const [streamText, setStreamText] = useState(null);
   const [quick, setQuick] = useState(OPENERS);
   const [showStrategies, setShowStrategies] = useState(false);
@@ -126,24 +133,37 @@ export default function CoachPage() {
 
   useEffect(() => {
     if (messages.length === 0 && active && mode === 'open') {
-      const firstName = 'friend';
-      const streakLine =
-        ctx.streak > 0
-          ? `You're on a ${ctx.streak}-day streak for ${active.name}.`
-          : ctx.totalClean > 0
-            ? `Today is a fresh start for ${active.name} — and I love a good comeback.`
-            : `Today is the start of your journey with ${active.name}.`;
-      const checkinLine = checkinNote(ctx);
+      const opening = getOpeningMessage(active.name);
       setMessages([
         {
           id: 1,
           role: 'coach',
-          text: `hey — I'm your coach, I know your journey. ${streakLine}${checkinLine ? ` ${checkinLine}` : ''} whatever comes up, I'm here.`,
+          text: opening,
         },
       ]);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, mode]);
+
+function getOpeningMessage(habit) {
+  const safeHabit = String(habit || '').trim().toLowerCase();
+  const commonOpenings = [
+    `Breaking free from ${habit} today. Whatever's on your mind, big or small — I'm right here. 💛`,
+    `You're taking this step for yourself today — that takes real courage. How are you feeling right now? 🤍`,
+    `Here with you through this day. Whatever you're carrying, we can face it together. ✨`,
+  ];
+
+  if (safeHabit === 'drugs' || safeHabit === 'substance use') {
+    const substanceOpenings = [
+      `You're choosing to step away from substance use today — that takes so much strength. I'm glad you're here. 🤍`,
+      `This is such a brave thing to do. Whatever you're feeling, I won't judge you — just tell me what's real for you right now. 💛`,
+      `I'm right here with you through this day. You don't have to be strong all on your own. ✨`,
+    ];
+    return substanceOpenings[Math.floor(Math.random() * substanceOpenings.length)];
+  }
+
+  return commonOpenings[Math.floor(Math.random() * commonOpenings.length)];
+}
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -151,13 +171,13 @@ export default function CoachPage() {
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
     isAtBottom.current = atBottom;
     setShowScrollBtn(!atBottom);
-  }, [messages, streamText, typing]);
+  }, [messages, streamText, isTyping]);
 
   useEffect(() => {
     if (isAtBottom.current) {
       scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
     }
-  }, [messages, typing]);
+  }, [messages, isTyping]);
 
   function scrollToBottom() {
     isAtBottom.current = true;
@@ -166,10 +186,14 @@ export default function CoachPage() {
   }
 
   async function streamReply(habitId, message) {
+    const history = messages.slice(-10).map((m) => ({
+      role: m.role === 'coach' ? 'assistant' : 'user',
+      text: m.text,
+    }));
     const res = await fetch('/api/ai/chat/stream', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ habitId, message, seed: msgCount.current * 7 }),
+      body: JSON.stringify({ habitId, message, seed: msgCount.current * 7, history }),
     });
     if (!res.ok || !res.body) {
       const data = await res.json().catch(() => ({}));
@@ -216,24 +240,24 @@ export default function CoachPage() {
 
   async function send(text) {
     const msg = (text || input).trim();
-    if (!msg || typing) return;
+    if (!msg || isTyping) return;
     msgCount.current += 1;
     const userMsgId = Date.now();
     setMessages((prev) => [...prev, { id: userMsgId, role: 'user', text: msg }]);
     setInput('');
-    setTyping(true);
+    setIsTyping(true);
     try {
       const quickReplies = await streamReply(active.id, msg);
-      setQuick(quickReplies || OPENERS);
+      setQuick(quickReplies || []);
     } catch {
       const local = coachReply(msg, { ...ctx, seed: msgCount.current * 7 });
       setOffline(true);
       await new Promise((r) => setTimeout(r, 600));
       const coachMsgId = Date.now() + 1;
       setMessages((prev) => [...prev, { id: coachMsgId, role: 'coach', text: local.text }]);
-      setQuick(local.quickReplies || OPENERS);
+      setQuick([]);
     } finally {
-      setTyping(false);
+      setIsTyping(false);
       setStreamText(null);
     }
   }
@@ -324,13 +348,13 @@ export default function CoachPage() {
               <SpeakButton key="speak-stream" text={streamText} />
               <span className="stream-cursor" aria-hidden="true" />
             </div>
-          ) : typing ? (
-            <div className="bubble coach">
-              <span className="dots">
-                <span />
-                <span />
-                <span />
-              </span>
+          ) : isTyping ? (
+            <div className="coach-message typing">
+              <div className="bubble">
+                <span className="dot"></span>
+                <span className="dot"></span>
+                <span className="dot"></span>
+              </div>
             </div>
           ) : null}
         </div>
@@ -345,7 +369,7 @@ export default function CoachPage() {
         <button
           className={`chip ${showStrategies ? 'active' : ''}`}
           onClick={() => setShowStrategies((v) => !v)}
-          disabled={typing}
+          disabled={isTyping}
           aria-expanded={showStrategies}
         >
           🛟 Coping strategies
@@ -353,7 +377,7 @@ export default function CoachPage() {
         {showStrategies && (
           <div className="strategy-row">
             {STRATEGY_PICKS.map((p) => (
-              <button key={p.msg} className="chip" onClick={() => pickStrategy(p)} disabled={typing}>
+              <button key={p.msg} className="chip" onClick={() => pickStrategy(p)} disabled={isTyping}>
                 {p.label}
               </button>
             ))}
@@ -363,7 +387,7 @@ export default function CoachPage() {
 
       <div className="quick-replies">
         {quick.map((q) => (
-          <button key={q} className="chip" onClick={() => send(q)} disabled={typing}>
+          <button key={q} className="chip" onClick={() => send(q)} disabled={isTyping}>
             {q}
           </button>
         ))}
@@ -379,7 +403,7 @@ export default function CoachPage() {
           placeholder="Talk to me..."
           maxLength={500}
         />
-        <button className="btn btn-primary" onClick={() => send()} disabled={!input.trim() || typing}>
+        <button className="btn btn-primary" onClick={() => send()} disabled={!input.trim() || isTyping}>
           Send
         </button>
       </div>

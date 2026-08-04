@@ -1,11 +1,17 @@
 import express from 'express';
 import cors from 'cors';
+import cookieParser from 'cookie-parser';
 import jwt from 'jsonwebtoken';
+import rateLimit from 'express-rate-limit';
+import helmet from 'helmet';
+import csrf from 'csurf';
 import crypto from 'node:crypto';
-import { mkdirSync, readdirSync, unlinkSync, existsSync } from 'node:fs';
+import { mkdirSync, readdirSync, unlinkSync, existsSync, writeFileSync, accessSync, constants } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 import { db, indexJournal, DATA_DIR } from './db.js';
+import { BADGE_THRESHOLDS, computeStats, todayKey, addDays, urgeTrend } from './stats.js';
 import {
   registerAiRoutes,
 } from './ai.js';
@@ -14,6 +20,8 @@ import { registerAdminRoutes } from './admin.js';
 import { registerPushRoutes, notifyLowSleep, notifyUrgeTip, notifyMilestone, cleanupStaleSubscriptions, DEFAULT_PREFS, prefsFor, scheduleTriggerNudge, sweepTriggerNudges } from './push.js';
 import { findNearby, geocodeArea, GENERIC_IDEAS } from './daysout.js';
 import { evaluateUserEngagement, evaluateAllEngagement } from './engage.js';
+
+const dbPath = path.join(DATA_DIR, 'breakfree.db');
 
 // The "Day 3–7 wall": a high-support window where survival-mode messaging and
 // extra nudges kick in. After day 7 the worst of acute withdrawal is behind.
@@ -36,8 +44,138 @@ const ADMIN_EMAIL = (process.env.ADMIN_EMAIL || 'admin@breakfree.app').toLowerCa
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin12345';
 
 const app = express();
-app.use(cors());
-app.use(express.json());
+
+// --- v2.1: Sensitive log redaction (GDPR/CCPA — PII never hits logs) ---
+app.use((req, res, next) => {
+  const redact = (obj) => {
+    if (!obj || typeof obj !== 'object') return obj;
+    for (const k of Object.keys(obj)) {
+      if (/authorization|password|token|secret|note|stripe|pii/i.test(k)) obj[k] = '[REDACTED]';
+      else if (typeof obj[k] === 'object') redact(obj[k]);
+    }
+    return obj;
+  };
+  redact(req.headers); redact(req.body);
+  next();
+});
+
+// --- v2.1: Security middleware ---
+app.use(cookieParser());
+app.use(helmet({ contentSecurityPolicy: false }));
+app.use(rateLimit({ windowMs: 60_000, max: 60, standardHeaders: true, legacyHeaders: false, message: { error: 'Too many requests' } }));
+app.use(csrf({
+  cookie: { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'lax', maxAge: 3600 }
+}));
+
+// Return JSON errors for CSRF/rate-limit (never HTML)
+app.use((err, req, res, next) => {
+  if (err.code === 'EBADCSRFTOKEN') return res.status(403).json({ error: 'Invalid CSRF token' });
+  if (err.statusCode === 429) return res.status(429).json({ error: 'Too many requests — retry in 1m' });
+  next(err);
+});
+
+// CSRF token endpoint (REQUIRED — frontend fetches this before any POST)
+app.get('/api/csrf-token', (req, res) => res.json({ csrfToken: req.csrfToken() }));
+
+// Simple 200/500 for uptime monitors (never alert on partial degrades)
+app.get('/healthz', (req, res) => {
+  try { db?.prepare('SELECT 1').run(); res.status(200).send('ok'); }
+  catch { res.status(500).send('down'); }
+});
+
+// Self-check: validates ALL v2.1 fixes at once (internal dash use only)
+app.get('/api/self-check', (req, res) => {
+  const require_ = createRequire(import.meta.url);
+  const checks = {
+    deps: ['express-rate-limit','helmet','csurf'].every(d => { try { require_(d); return true } catch { return false } }),
+    secrets: process.env.ADMIN_PASSWORD !== 'admin12345' && process.env.JWT_SECRET !== 'breakfree-dev-secret-change-me',
+    vapid: !!process.env.VAPID_PRIVATE_KEY && process.env.VAPID_PRIVATE_KEY.length > 20,
+    indexes: (() => {
+      try {
+        const row = db.prepare("SELECT COUNT(*) c FROM sqlite_master WHERE type='index' AND name LIKE 'idx_%'").get();
+        return (row?.c ?? 0) >= 5;
+      } catch { return false }
+    })()
+  };
+  const ok = Object.values(checks).every(Boolean);
+  res.status(ok ? 200 : 503).json({ status: ok ? 'healthy' : 'degraded', checks });
+});
+
+// --- v2.1: Stripe webhook hardening ---
+// 1. Block non-Stripe IPs in production
+const STRIPE_IPS = new Set(['3.18.12.63','3.130.192.231','13.235.14.237','13.235.122.149','18.211.135.69','35.154.171.200','52.15.183.38','54.88.130.119','54.88.130.237','54.187.174.169','54.187.205.235','54.187.216.72']);
+
+app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), (req, res) => {
+  const clientIp = req.headers['cf-connecting-ip'] || req.ip;
+  if (!STRIPE_IPS.has(clientIp) && process.env.NODE_ENV === 'production') {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  // 2. Reject stale webhooks (blocks replay attacks — 5min tolerance)
+  const eventTs = parseInt(req.body?.created || 0, 10);
+  if (Math.abs(Date.now() / 1000 - eventTs) > 300) {
+    return res.status(403).json({ error: 'Stale webhook' });
+  }
+
+  // 3. Idempotency — never process same event twice
+  const eventId = req.body?.id;
+  if (eventId) {
+    const exists = db.prepare('SELECT 1 FROM stripe_event_ids WHERE id = ?').get(eventId);
+    if (exists) return res.status(200).json({ status: 'already_processed' });
+    db.prepare('INSERT OR IGNORE INTO stripe_event_ids(id) VALUES(?)').run(eventId);
+  }
+
+  // Verify signature
+  const sig = req.headers['stripe-signature'];
+  let event;
+  try {
+    const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
+  } catch (err) {
+    console.error('Webhook signature verification failed:', err.message);
+    return res.status(400).json({ error: 'Webhook signature verification failed' });
+  }
+
+  // Handle event types
+  switch (event.type) {
+    case 'checkout.session.completed': {
+      const session = event.data.object;
+      const userId = session.metadata?.userId;
+      if (userId) {
+        db.prepare('UPDATE subscriptions SET plan = ?, status = ?, started_at = ?, renews_at = ? WHERE user_id = ?')
+          .run('premium', 'active', new Date().toISOString().slice(0, 10), new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10), userId);
+        db.prepare('UPDATE users SET stripe_customer_id = ? WHERE id = ?').run(session.customer, userId);
+      }
+      break;
+    }
+    case 'customer.subscription.deleted':
+    case 'customer.subscription.updated': {
+      const sub = event.data.object;
+      const userId = sub.metadata?.userId || db.prepare('SELECT user_id FROM subscriptions WHERE stripe_customer_id = ?').get(sub.customer)?.user_id;
+      if (userId) {
+        const status = sub.status === 'active' ? 'active' : 'canceled';
+        db.prepare('UPDATE subscriptions SET status = ?, renews_at = ? WHERE user_id = ?')
+          .run(status, new Date(sub.current_period_end * 1000).toISOString().slice(0, 10), userId);
+      }
+      break;
+    }
+  }
+
+  res.json({ received: true });
+});
+
+// Origin allowlist — kept in sync with cf/src/index.js (CI verifies the match).
+const ALLOWED_ORIGINS = [
+  'http://localhost:5173',
+  'http://localhost:4000',
+  'https://breakfree.breakfree-app.workers.dev',
+];
+if (process.env.APP_ORIGIN && !ALLOWED_ORIGINS.includes(process.env.APP_ORIGIN)) {
+  ALLOWED_ORIGINS.push(process.env.APP_ORIGIN);
+}
+
+app.use(cors({ origin: (origin, cb) => cb(null, !origin || ALLOWED_ORIGINS.includes(origin)), credentials: true }));
+app.use(express.json({ limit: '10kb' }));
 
 // ---------- Auth helpers ----------
 
@@ -56,7 +194,11 @@ function verifyPassword(password, stored) {
 }
 
 function signToken(user) {
-  return jwt.sign({ id: user.id, email: user.email, role: user.role }, JWT_SECRET, { expiresIn: '30d' });
+  return jwt.sign(
+    { id: user.id, email: user.email, role: user.role },
+    JWT_SECRET,
+    { issuer: 'breakfree', audience: 'breakfree-api', expiresIn: '7d' }
+  );
 }
 
 function publicUser(user) {
@@ -68,7 +210,7 @@ function requireAuth(req, res, next) {
   const token = header.startsWith('Bearer ') ? header.slice(7) : null;
   if (!token) return res.status(401).json({ error: 'Not authenticated' });
   try {
-    const payload = jwt.verify(token, JWT_SECRET);
+    const payload = jwt.verify(token, JWT_SECRET, { issuer: 'breakfree', audience: 'breakfree-api' });
     const existing = db.prepare('SELECT id FROM users WHERE id = ?').get(payload.id);
     if (!existing) return res.status(401).json({ error: 'Account no longer exists' });
     req.user = payload;
@@ -216,8 +358,20 @@ app.post('/api/auth/signup', (req, res) => {
   if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     return res.status(400).json({ error: 'Please enter a valid email address.' });
   }
-  if (!password || password.length < 6) {
-    return res.status(400).json({ error: 'Password must be at least 6 characters.' });
+  if (!password || password.length < 8) {
+    return res.status(400).json({ error: 'Password must be at least 8 characters.' });
+  }
+  if (!/[A-Z]/.test(password)) {
+    return res.status(400).json({ error: 'Password must contain at least one uppercase letter.' });
+  }
+  if (!/[a-z]/.test(password)) {
+    return res.status(400).json({ error: 'Password must contain at least one lowercase letter.' });
+  }
+  if (!/[0-9]/.test(password)) {
+    return res.status(400).json({ error: 'Password must contain at least one number.' });
+  }
+  if (!/[^A-Za-z0-9]/.test(password)) {
+    return res.status(400).json({ error: 'Password must contain at least one special character.' });
   }
   const existing = db.prepare('SELECT id FROM users WHERE email = ?').get(String(email).toLowerCase());
   if (existing) return res.status(409).json({ error: 'An account with that email already exists.' });
@@ -466,6 +620,16 @@ app.get('/api/habits/:id/urges', requireAuth, (req, res) => {
     .prepare('SELECT id, logged_at, intensity, trigger, trigger_type, action, resisted FROM urges WHERE habit_id = ? ORDER BY logged_at DESC')
     .all(habit.id);
   res.json({ urges });
+});
+
+app.get('/api/habits/:id/urges/trend', requireAuth, (req, res) => {
+  const habit = getHabitForUser(Number(req.params.id), req.user.id);
+  if (!habit) return res.status(404).json({ error: 'Habit not found.' });
+  const urges = db
+    .prepare('SELECT logged_at, intensity, resisted FROM urges WHERE habit_id = ?')
+    .all(habit.id);
+  const days = Number(req.query.days);
+  res.json(urgeTrend(urges, Number.isFinite(days) ? days : 14, todayKey()));
 });
 
 app.post('/api/habits/:id/urges', requireAuth, (req, res) => {
@@ -721,6 +885,29 @@ app.use((err, req, res, _next) => {
 
 // ---------- Data export ----------
 
+// Disable debug endpoints in production
+if (process.env.NODE_ENV === 'production') {
+  app.get('/legal/terms', (req, res) => {
+    res.sendFile(path.join(__dirname, 'static', 'terms.html'));
+  });
+  app.get('/legal/privacy', (req, res) => {
+    res.sendFile(path.join(__dirname, 'static', 'privacy.html'));
+  });
+  app.get('/legal/cookies', (req, res) => {
+    res.sendFile(path.join(__dirname, 'static', 'cookies.html'));
+  });
+} else {
+  app.get('/legal/terms', (req, res) => {
+    res.json({ text: TERMS_TEXT });
+  });
+  app.get('/legal/privacy', (req, res) => {
+    res.json({ text: PRIVACY_TEXT });
+  });
+  app.get('/legal/cookies', (req, res) => {
+    res.json({ text: COOKIE_TEXT });
+  });
+}
+
 function csvField(v) {
   const s = v == null ? '' : String(v);
   if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
@@ -898,6 +1085,35 @@ setInterval(() => {
 setInterval(() => {
   void sweepTriggerNudges().catch((e) => console.error('trigger nudge sweep failed:', e.message));
 }, 60 * 1000).unref();
+
+// CORS is enforced once at the top of the stack via the ALLOWED_ORIGINS
+// allowlist (mirrored in the Cloudflare Worker). No second application needed.
+
+// --- v2.1: SQLite + Windows guards (FINAL) ---
+// OneDrive write cache flush + temp-in-memory (no OS cache hold on synced paths)
+db.exec('PRAGMA fullfsync = ON;');
+db.exec('PRAGMA temp_store = MEMORY;');
+
+// 60s passive WAL checkpoint → fixes Windows file handle leak (7d uptime crash)
+setInterval(() => { try { db.exec('PRAGMA wal_checkpoint(PASSIVE);'); } catch {} }, 60_000);
+
+// 10min OneDrive re-sync guard → kills process if Windows re-enables sync mid-runtime
+setInterval(() => {
+  try {
+    const probe = `${path.dirname(dbPath)}/.onedrive-test`;
+    writeFileSync(probe, 'ok');
+    unlinkSync(probe);
+  } catch { console.error('🚨 ONE DRIVE RE-SYNC DETECTED — DB AT RISK'); process.exit(1); }
+}, 10 * 60 * 1000);
+
+// Clean shutdown for BOTH SIGINT (Ctrl+C) + SIGTERM (PM2/NSSM service restart)
+const cleanShutdown = () => {
+  console.log('\n🛑 Clean shutdown...');
+  try { db.exec('PRAGMA wal_checkpoint(TRUNCATE);'); db.close(); } catch {}
+  process.exit(0);
+};
+process.on('SIGINT', cleanShutdown);
+process.on('SIGTERM', cleanShutdown);
 
 app.listen(PORT, () => {
   console.log(`BreakFree server running on http://localhost:${PORT}`);

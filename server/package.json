@@ -1,17 +1,39 @@
 {
   "name": "breakfree-server",
-  "version": "1.0.0",
+  "version": "2.1.0",
   "private": true,
   "type": "module",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js",
-    "dev": "node --watch index.js"
+    "preinstall": "node --max-old-space-size=4096 -e \"console.log('preinstall: max-old-space-size=4096')\"",
+    "prestart": "node scripts/check-secrets.cjs",
+    "predeploy": "node scripts/check-secrets.cjs && powershell -ExecutionPolicy Bypass -File ./scripts/smoke-test.ps1 && node -e \"console.log('⏳ WAIT 10 MIN POST-DEPLOY BEFORE REVOKING STRIPE KEYS'); setInterval(()=>{},1000)\"",
+    "start": "chcp 65001 >nul && node index.js",
+    "dev": "node --watch index.js",
+    "migrate": "node scripts/run-migrations.cjs",
+    "migrate:dry": "node scripts/run-migrations.cjs --dry-run",
+    "smoke": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/smoke-test.ps1",
+    "verify:js": "node scripts/verify-v2.1-fixes.cjs",
+    "verify:ps": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/verify-v2.1-fixes.ps1",
+    "test": "vitest run"
   },
   "dependencies": {
+    "better-sqlite3": "^13.0.2",
+    "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
+    "csurf": "^1.11.0",
+    "dotenv": "^17.4.2",
     "express": "^4.21.2",
+    "express-rate-limit": "^7.4.0",
+    "helmet": "^7.1.0",
     "jsonwebtoken": "^9.0.2",
+    "stripe": "^16.0.0",
     "web-push": "^3.6.7"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.10"
+  },
+  "overrides": {
+    "cookie": "^0.7.0"
   }
 }

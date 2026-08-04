@@ -2,7 +2,7 @@
 
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
-import { computeStats, BADGE_THRESHOLDS, todayKey, dateKey, addDays } from './stats.js';
+import { computeStats, BADGE_THRESHOLDS, todayKey, dateKey, addDays, urgeTrend } from './stats.js';
 import { hashPassword, verifyPassword, signToken, verifyToken, randomHex } from './auth.js';
 import { registerAiRoutes } from './ai.js';
 import { sendPush, loadOrCreateVapid } from './push.js';
@@ -19,7 +19,21 @@ function wallInfo(stats) {
 }
 
 const app = new Hono();
-app.use('/api/*', cors());
+
+// JWT claims — must match the Node build (CI checks them against server/index.js).
+const JWT_CLAIMS = { issuer: 'breakfree', audience: 'breakfree-api' };
+
+// Origin allowlist — kept in sync with server/index.js (CI verifies the match).
+const ALLOWED_ORIGINS = [
+  'http://localhost:5173',
+  'http://localhost:4000',
+  'https://breakfree.breakfree-app.workers.dev',
+];
+
+app.use('/api/*', cors({
+  origin: (origin, cb) => cb(null, !origin || ALLOWED_ORIGINS.includes(origin)),
+  credentials: true,
+}));
 
 // Security headers on every response.
 app.use('*', async (c, next) => {
@@ -50,7 +64,7 @@ app.use('/api/*', async (c, next) => {
   const header = c.req.header('authorization') || '';
   const token = header.startsWith('Bearer ') ? header.slice(7) : null;
   if (token) {
-    const user = await verifyToken(token, c.env.JWT_SECRET);
+    const user = await verifyToken(token, c.env.JWT_SECRET, JWT_CLAIMS);
     if (user) {
       // Re-check the account still exists so deleted accounts lose access
       // immediately rather than when their token expires.
@@ -272,7 +286,7 @@ app.post('/api/auth/signup', async (c) => {
   const hash = await hashPassword(password);
   const info = await c.env.DB.prepare('INSERT INTO users (email, password_hash) VALUES (?, ?)').bind(em, hash).run();
   const user = { id: Number(info.meta.last_row_id), email: em, role: 'user' };
-  const token = await signToken(user, c.env.JWT_SECRET);
+  const token = await signToken(user, c.env.JWT_SECRET, 60 * 60 * 24 * 365, JWT_CLAIMS);
   try {
     const cfTz = c.req.raw.cf?.timezone || c.req.cf?.timezone;
     if (cfTz) await c.env.DB.prepare('UPDATE users SET timezone = ? WHERE id = ?').bind(String(cfTz).slice(0, 64), user.id).run();
@@ -291,7 +305,7 @@ app.post('/api/auth/login', async (c) => {
   const user = await c.env.DB.prepare('SELECT * FROM users WHERE email = ?').bind(String(email).toLowerCase()).first();
   if (!user || !(await verifyPassword(password, user.password_hash))) return c.json({ error: 'Invalid email or password.' }, 401);
   const expiresSec = rememberMe ? 60 * 60 * 24 * 7 : 60 * 60;
-  const token = await signToken(user, c.env.JWT_SECRET, expiresSec);
+  const token = await signToken(user, c.env.JWT_SECRET, expiresSec, JWT_CLAIMS);
   c.header('Set-Cookie', `bf_auth=${token}; HttpOnly; Secure; SameSite=Strict; Max-Age=${expiresSec}; Path=/`);
   return c.json({ token, user: publicUser(user), expiresIn: expiresSec });
 });
@@ -564,6 +578,16 @@ app.get('/api/habits/:id/urges', async (c) => {
   if (!habit) return c.json({ error: 'Habit not found.' }, 404);
   const urges = (await c.env.DB.prepare('SELECT id, logged_at, intensity, trigger, trigger_type, action, resisted FROM urges WHERE habit_id = ? ORDER BY logged_at DESC').bind(habit.id).all()).results;
   return c.json({ urges });
+});
+
+app.get('/api/habits/:id/urges/trend', async (c) => {
+  const u = userOf(c);
+  if (!u) return c.json({ error: 'Not authenticated' }, 401);
+  const habit = await habitOf(c.env, c.req.param('id'), u.id);
+  if (!habit) return c.json({ error: 'Habit not found.' }, 404);
+  const urges = (await c.env.DB.prepare('SELECT logged_at, intensity, resisted FROM urges WHERE habit_id = ?').bind(habit.id).all()).results;
+  const days = Number(c.req.query('days'));
+  return c.json(urgeTrend(urges, Number.isFinite(days) ? days : 14, todayKey()));
 });
 
 app.post('/api/habits/:id/urges', async (c) => {
@@ -2043,24 +2067,60 @@ async function sendScheduledNudges(env) {
   return sent;
 }
 
+// Wrap D1 so every statement runs with strong consistency. This closes the
+// eventual-consistency read-after-write gap (e.g. a deleted account's token
+// surviving a few seconds on a replica, or a just-created habit not being
+// visible on the next read).
+function strongDB(db) {
+  const prepare = db.prepare.bind(db);
+  return new Proxy(db, {
+    get(target, prop, receiver) {
+      if (prop === 'prepare') {
+        return (sql) => {
+          const stmt = prepare(sql);
+          return new Proxy(stmt, {
+            get(s, method, recv) {
+              if (method === 'bind') {
+                return (...args) => {
+                  s.bind(...args);
+                  return recv;
+                };
+              }
+              if (method === 'all' || method === 'first' || method === 'run' || method === 'raw' || method === 'count') {
+                return (...args) => s[method](...args, { consistency: 'strong' });
+              }
+              const val = s[method];
+              return typeof val === 'function' ? val.bind(s) : val;
+            },
+          });
+        };
+      }
+      const val = Reflect.get(target, prop);
+      return typeof val === 'function' ? val.bind(target) : val;
+    },
+  });
+}
+
 // Entry handler: ensures the admin account exists, then runs the app.
 export default {
-  async fetch(request, env, ctx) {
+  async fetch(request, env, context) {
     env.STARTED_AT = env.STARTED_AT || Date.now();
+    env.DB = strongDB(env.DB);
     const url = new URL(request.url);
     if (url.pathname.startsWith('/api/')) {
-      try {
-        await ensureAdmin(env); // lazily bootstraps the admin account
-        await seedCommunityPosts(env); // seed community posts on first boot
-      } catch (e) {
-        console.error('boot failed:', e.message);
-      }
+      // Bootstrapping runs in the background so the first request isn't
+      // delayed waiting for admin seeding + community post seeding.
+      context.waitUntil(Promise.all([
+        ensureAdmin(env).catch((e) => console.error('boot failed:', e.message)),
+        seedCommunityPosts(env).catch((e) => console.error('seed failed:', e.message)),
+      ]));
     }
-    return app.fetch(request, env, ctx);
+    return app.fetch(request, env, context);
   },
   // Proactive push: daily reminder + missed milestone nudge, gated on prefs.
-  async scheduled(event, env, ctx) {
+  async scheduled(event, env, context) {
     try {
+      env.DB = strongDB(env.DB);
       const sent = await sendScheduledNudges(env);
       const eng = await evaluateAllEngagement(env);
       console.log(`scheduled nudges: ${sent} sent; engagement: ${eng.cascade} cascade, ${eng.digest} digest`);

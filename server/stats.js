@@ -102,3 +102,55 @@ export function computeStats(checkins, dailyCost, dailyTime, unitsPerDay) {
     todayForgiven,
   };
 }
+
+const TREND_DAYS = [7, 14, 30];
+
+export function urgeTrend(urges, days = 14, today = todayKey()) {
+  const span = TREND_DAYS.includes(Number(days)) ? Number(days) : 14;
+  const start = addDays(today, -(span - 1));
+  const byDay = new Map();
+  for (const u of urges || []) {
+    const date = String(u.logged_at || '').slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || date < start) continue;
+    const rec = byDay.get(date) || { date, count: 0, intensitySum: 0, resisted: 0 };
+    rec.count += 1;
+    rec.intensitySum += Number(u.intensity) || 0;
+    if (u.resisted) rec.resisted += 1;
+    byDay.set(date, rec);
+  }
+  const series = [...byDay.values()]
+    .sort((a, b) => (a.date < b.date ? -1 : 1))
+    .map((r) => ({
+      date: r.date,
+      count: r.count,
+      avgIntensity: +(r.intensitySum / r.count).toFixed(1),
+      resistedCount: r.resisted,
+    }));
+
+  let changePct = null;
+  if (series.length >= 2) {
+    const mid = Math.ceil(series.length / 2);
+    const firstAvg = series.slice(0, mid).reduce((s, p) => s + p.count, 0) / mid;
+    const lastAvg = series.slice(mid).reduce((s, p) => s + p.count, 0) / Math.max(series.length - mid, 1);
+    if (firstAvg > 0) changePct = +(((firstAvg - lastAvg) / firstAvg) * 100).toFixed(1);
+  }
+
+  let trend = null;
+  if (series.length >= 2) {
+    const n = series.length;
+    const meanX = (n - 1) / 2;
+    const meanY = series.reduce((s, p) => s + p.count, 0) / n;
+    let num = 0;
+    let den = 0;
+    for (let i = 0; i < n; i++) {
+      num += (i - meanX) * (series[i].count - meanY);
+      den += (i - meanX) * (i - meanX);
+    }
+    const slope = den === 0 ? 0 : num / den;
+    if (slope < -0.1) trend = 'improving';
+    else if (slope > 0.1) trend = 'worsening';
+    else trend = 'stable';
+  }
+
+  return { days: span, changePct, trend, series };
+}

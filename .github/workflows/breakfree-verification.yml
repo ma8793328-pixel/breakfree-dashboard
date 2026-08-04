@@ -1,0 +1,173 @@
+name: BreakFree v2.1 Verification
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  verification-linux:
+    name: JS Verification (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install server dependencies
+        run: npm ci --prefix server
+
+      - name: Create test database
+        run: |
+          cd server
+          node -e "
+            const Database = require('better-sqlite3');
+            const db = new Database('./data/breakfree.db');
+            db.exec('CREATE TABLE IF NOT EXISTS habits (id INTEGER PRIMARY KEY, user_id INTEGER)');
+            db.exec('CREATE TABLE IF NOT EXISTS urges (id INTEGER PRIMARY KEY, habit_id INTEGER, created_at TEXT)');
+            db.exec('CREATE TABLE IF NOT EXISTS checkins (id INTEGER PRIMARY KEY, habit_id INTEGER, created_at TEXT)');
+            db.exec('CREATE TABLE IF NOT EXISTS push_subscriptions (id INTEGER PRIMARY KEY, user_id INTEGER)');
+            db.exec('CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, email TEXT)');
+            db.exec('CREATE INDEX IF NOT EXISTS idx_habits_user_id ON habits(user_id)');
+            db.exec('CREATE INDEX IF NOT EXISTS idx_urges_habit_date ON urges(habit_id, created_at DESC)');
+            db.exec('CREATE INDEX IF NOT EXISTS idx_checkins_habit_date ON checkins(habit_id, created_at DESC)');
+            db.exec('CREATE INDEX IF NOT EXISTS idx_push_subs_user_id ON push_subscriptions(user_id)');
+            db.exec('CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)');
+            db.exec('CREATE TABLE IF NOT EXISTS stripe_event_ids (id TEXT PRIMARY KEY, processed_at TEXT DEFAULT CURRENT_TIMESTAMP)');
+            db.pragma('journal_mode = WAL');
+            db.pragma('fullfsync = ON');
+            db.close();
+            console.log('Test DB ready');
+          "
+
+      - name: Run JS verification
+        run: |
+          cd server
+          node scripts/verify-v2.1-fixes.cjs
+        env:
+          NODE_ENV: test
+          ADMIN_PASSWORD: test_admin_password_123456
+          JWT_SECRET: 1234567890123456789012345678901234567890123456789012345678901234
+          STRIPE_SECRET_KEY: sk_live_test_abcdefghijklmnopqrstuvwxyz
+          STRIPE_WEBHOOK_SECRET: whsec_test_abcdefghijklmnopqrstuvwxyz
+          VAPID_PUBLIC_KEY: BPtest_public_key_value_longer_than_twenty_chars_xyz
+          VAPID_PRIVATE_KEY: test_private_key_value_longer_than_twenty_chars_xyz
+          VAPID_CONTACT_EMAIL: test@breakfree.app
+
+  verification-windows:
+    name: PowerShell Verification (Windows)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install server dependencies
+        run: npm ci --prefix server
+
+      - name: Create test database
+        shell: pwsh
+        run: |
+          cd server
+          node -e "
+            const Database = require('better-sqlite3');
+            const db = new Database('./data/breakfree.db');
+            db.exec('CREATE TABLE IF NOT EXISTS habits (id INTEGER PRIMARY KEY, user_id INTEGER)');
+            db.exec('CREATE TABLE IF NOT EXISTS urges (id INTEGER PRIMARY KEY, habit_id INTEGER, created_at TEXT)');
+            db.exec('CREATE TABLE IF NOT EXISTS checkins (id INTEGER PRIMARY KEY, habit_id INTEGER, created_at TEXT)');
+            db.exec('CREATE TABLE IF NOT EXISTS push_subscriptions (id INTEGER PRIMARY KEY, user_id INTEGER)');
+            db.exec('CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, email TEXT)');
+            db.exec('CREATE INDEX IF NOT EXISTS idx_habits_user_id ON habits(user_id)');
+            db.exec('CREATE INDEX IF NOT EXISTS idx_urges_habit_date ON urges(habit_id, created_at DESC)');
+            db.exec('CREATE INDEX IF NOT EXISTS idx_checkins_habit_date ON checkins(habit_id, created_at DESC)');
+            db.exec('CREATE INDEX IF NOT EXISTS idx_push_subs_user_id ON push_subscriptions(user_id)');
+            db.exec('CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)');
+            db.exec('CREATE TABLE IF NOT EXISTS stripe_event_ids (id TEXT PRIMARY KEY, processed_at TEXT DEFAULT CURRENT_TIMESTAMP)');
+            db.pragma('journal_mode = WAL');
+            db.pragma('fullfsync = ON');
+            db.close();
+            console.log('Test DB ready');
+          "
+
+      - name: Run PowerShell verification
+        shell: pwsh
+        run: |
+          cd server
+          .\scripts\verify-v2.1-fixes.ps1
+        env:
+          NODE_ENV: test
+          ADMIN_PASSWORD: test_admin_password_123456
+          JWT_SECRET: 1234567890123456789012345678901234567890123456789012345678901234
+          STRIPE_SECRET_KEY: sk_live_test_abcdefghijklmnopqrstuvwxyz
+          STRIPE_WEBHOOK_SECRET: whsec_test_abcdefghijklmnopqrstuvwxyz
+          VAPID_PUBLIC_KEY: BPtest_public_key_value_longer_than_twenty_chars_xyz
+          VAPID_PRIVATE_KEY: test_private_key_value_longer_than_twenty_chars_xyz
+          VAPID_CONTACT_EMAIL: test@breakfree.app
+
+  cf-sync-check:
+    name: Cloudflare Worker Sync Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify CF Worker sync
+        run: |
+          set -e
+          # JWT claims must match between Node server and CF Worker
+          if grep -q "issuer: 'breakfree'" server/index.js && \
+             grep -q "issuer: 'breakfree'" cf/src/index.js && \
+             grep -q "audience: 'breakfree-api'" server/index.js && \
+             grep -q "audience: 'breakfree-api'" cf/src/index.js; then
+            echo "✅ JWT claims match"
+          else
+            echo "❌ JWT claims mismatch"
+            exit 1
+          fi
+
+          # CORS origins must match
+          if grep -q "ALLOWED_ORIGINS.*breakfree.app" server/index.js && \
+             grep -q "ALLOWED_ORIGINS.*breakfree.app" cf/src/index.js; then
+            echo "✅ CORS origins match"
+          else
+            echo "❌ CORS origins mismatch"
+            exit 1
+          fi
+
+          # D1 strong consistency after writes
+          if grep -q "consistency.*strong" cf/src/index.js; then
+            echo "✅ Strong consistency enabled"
+          else
+            echo "❌ Strong consistency not enabled"
+            exit 1
+          fi
+
+          # context.waitUntil for background D1 work
+          if grep -q "context.waitUntil" cf/src/index.js; then
+            echo "✅ context.waitUntil present"
+          else
+            echo "❌ context.waitUntil missing"
+            exit 1
+          fi
+
+          echo "🎉 CF Worker sync checks passed"
+
+      - name: Notify on failure (Slack / webhook)
+        if: failure()
+        env:
+          WEBHOOK_URL: ${{ secrets.DEPLOY_WEBHOOK_URL }}
+        run: |
+          curl -sS -X POST -H 'Content-type: application/json' \
+            --data "{\"text\":\"🚨 BreakFree v2.1 verification failed\nRepo: ${{ github.repository }}\nBranch: ${{ github.ref_name }}\nRun: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
+            "$WEBHOOK_URL"

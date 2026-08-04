@@ -4,7 +4,9 @@
 
 import { coachReply, reflectOnJournal, urgeInsight } from './aiCoach.js';
 import { computeStats, todayKey } from './stats.js';
+import { milestoneFor } from './recovery.js';
 import { chat, streamChat, buildMessages } from './openai.js';
+import { loadMemory, saveMemory, memoryToPrompt } from './coachMemory.js';
 
 export async function buildCoachCtx(env, habit) {
   const checkins = (await env.DB.prepare('SELECT date, status, forgiven FROM checkins WHERE habit_id = ?').bind(habit.id).all())
@@ -21,6 +23,7 @@ export async function buildCoachCtx(env, habit) {
   const dailyRows = (await env.DB.prepare('SELECT date, energy, sleep, mood FROM daily_checkins WHERE habit_id = ? ORDER BY date DESC LIMIT 14').bind(habit.id).all())
     .results
     .reverse();
+  const { current: currentMilestone, next: nextMilestone } = milestoneFor(habit.name, stats.totalClean);
   return {
     habitName: habit.name,
     streak: stats.currentStreak,
@@ -32,33 +35,18 @@ export async function buildCoachCtx(env, habit) {
     urges,
     journals,
     dailyCheckin,
-    dailyCheckins: dailyRows,
+    dailyCheckins,
+    currentMilestone,
+    nextMilestone,
   };
 }
 
-function sseStream(words, quickReplies) {
-  const encoder = new TextEncoder();
-  return new ReadableStream({
-    start(controller) {
-      let i = 0;
-      let done = false;
-      const timer = setInterval(() => {
-        if (done) return;
-        if (i >= words.length) {
-          done = true;
-          clearInterval(timer);
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ done: true, quickReplies: quickReplies || [] })}\n\n`));
-          controller.close();
-          return;
-        }
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ delta: words[i++] })}\n\n`));
-      }, 32);
-      controller._timer = timer;
-    },
-    cancel() {
-      clearInterval(this._timer);
-    },
-  });
+function historyFromBody(body) {
+  const raw = Array.isArray(body.history) ? body.history : [];
+  return raw
+    .filter((m) => m && (m.role === 'user' || m.role === 'coach'))
+    .map((m) => ({ role: m.role === 'coach' ? 'assistant' : 'user', text: String(m.text || '') }))
+    .slice(-10);
 }
 
 export function registerAiRoutes(app, { env, userOf }) {
@@ -70,10 +58,15 @@ export function registerAiRoutes(app, { env, userOf }) {
     if (!habit) return c.json({ error: 'Habit not found.' }, 404);
     if (!body.message || !String(body.message).trim()) return c.json({ error: 'Message cannot be empty.' }, 400);
     const ctx = { ...(await buildCoachCtx(env(c), habit)), seed: Number(body.seed || 0) };
+    const history = historyFromBody(body);
     try {
-      const text = await chat(env(c), buildMessages(body.message, ctx));
+      const memory = await loadMemory(env(c), u.id, habit.id);
+      const memoryPrompt = memoryToPrompt(memory);
+      const text = await chat(env(c), buildMessages(body.message, ctx, history, memoryPrompt));
+      await saveMemory(env(c), u.id, habit.id, body.message);
       return c.json({ text, quickReplies: [] });
     } catch (e) {
+      console.error('AI chat failed, falling back to canned reply:', e.message, e.stack);
       return c.json(coachReply(String(body.message), ctx));
     }
   });
@@ -86,7 +79,15 @@ export function registerAiRoutes(app, { env, userOf }) {
     if (!habit) return c.json({ error: 'Habit not found.' }, 404);
     if (!body.message || !String(body.message).trim()) return c.json({ error: 'Message cannot be empty.' }, 400);
     const ctx = { ...(await buildCoachCtx(env(c), habit)), seed: Number(body.seed || 0) };
-    const messages = buildMessages(body.message, ctx);
+    const history = historyFromBody(body);
+    let memory;
+    try {
+      memory = await loadMemory(env(c), u.id, habit.id);
+    } catch {
+      memory = null;
+    }
+    const memoryPrompt = memoryToPrompt(memory);
+    const messages = buildMessages(body.message, ctx, history, memoryPrompt);
 
     let closed = false;
     let timer = null;
@@ -103,7 +104,9 @@ export function registerAiRoutes(app, { env, userOf }) {
               send({ done: true, quickReplies: [] });
               controller.close();
             });
+            await saveMemory(env(c), u.id, habit.id, body.message);
           } catch (e) {
+            console.error('AI stream failed, falling back to canned reply:', e.message, e.stack);
             const reply = coachReply(String(body.message), ctx);
             const words = reply.text.split(/(\s+)/);
             let i = 0;
@@ -111,7 +114,7 @@ export function registerAiRoutes(app, { env, userOf }) {
               if (closed || i >= words.length) {
                 clearInterval(timer);
                 if (!closed && i >= words.length) {
-                  send({ done: true, quickReplies: reply.quickReplies || [] });
+                  send({ done: true, quickReplies: reply.quickReplies || [], fallback: true });
                   controller.close();
                 }
                 return;

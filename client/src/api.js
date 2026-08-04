@@ -109,6 +109,12 @@ export async function recordShare(habitId, days, token) {
   return api('/shares', { method: 'POST', token, body: { habitId, days } });
 }
 
+// Urge trend: daily urge counts within a window (7/14/30 days, default 14).
+// Returns { days, changePct, trend, series: [{ date, count, avgIntensity, resistedCount }] }.
+export async function fetchUrgeTrend(habitId, days, token) {
+  return api(`/habits/${habitId}/urges/trend?days=${days}`, { token });
+}
+
 export async function fetchShareTotal() {
   return api('/shares/total');
 }

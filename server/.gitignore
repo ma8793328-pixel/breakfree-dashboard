@@ -1,0 +1,12 @@
+﻿vapid.json
+.env
+*.db
+*.db.bak
+*.sqlite
+*.sqlite.bak
+*.db-wal
+*.db-shm
+*.migrate-backup-*
+mb-*.enc
+node_modules
+dist

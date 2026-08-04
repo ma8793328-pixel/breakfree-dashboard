@@ -3365,3 +3365,38 @@ a {
     padding: 44px 18px;
   }
 }
+
+.typing .bubble {
+  background: rgba(255, 255, 255, 0.1);
+  padding: 14px 18px;
+  border-radius: 18px 18px 18px 4px;
+  display: flex;
+  gap: 4px;
+}
+
+.typing .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #888;
+  animation: bounce 1.4s infinite ease-in-out both;
+}
+
+.typing .dot:nth-child(1) {
+  animation-delay: -0.32s;
+}
+
+.typing .dot:nth-child(2) {
+  animation-delay: -0.16s;
+}
+
+@keyframes bounce {
+  0%,
+  80%,
+  100% {
+    transform: scale(0);
+  }
+  40% {
+    transform: scale(1);
+  }
+}

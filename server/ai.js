@@ -1,7 +1,9 @@
 import { db } from './db.js';
 import { computeStats, todayKey } from './stats.js';
+import { milestoneFor } from './recovery.js';
 import { coachReply, reflectOnJournal, urgeInsight } from './aiCoach.js';
-import { chat, streamChat, buildMessages, SYSTEM_PROMPT } from './openai.js';
+import { chat, streamChat, buildMessages } from './openai.js';
+import { loadMemory, saveMemory, memoryToPrompt } from './coachMemory.js';
 
 export function buildCoachCtx(habit) {
   const checkins = db.prepare('SELECT date, status, forgiven FROM checkins WHERE habit_id = ?').all(habit.id);
@@ -18,6 +20,7 @@ export function buildCoachCtx(habit) {
     .prepare('SELECT date, energy, sleep, mood FROM daily_checkins WHERE habit_id = ? ORDER BY date DESC LIMIT 14')
     .all(habit.id)
     .reverse();
+  const { current: currentMilestone, next: nextMilestone } = milestoneFor(habit.name, stats.totalClean);
   return {
     habitName: habit.name,
     streak: stats.currentStreak,
@@ -30,13 +33,23 @@ export function buildCoachCtx(habit) {
     journals,
     dailyCheckin: dailyCheckin || null,
     dailyCheckins,
+    currentMilestone,
+    nextMilestone,
   };
+}
+
+function historyFromBody(body) {
+  const raw = Array.isArray(body.history) ? body.history : [];
+  return raw
+    .filter((m) => m && (m.role === 'user' || m.role === 'coach'))
+    .map((m) => ({ role: m.role === 'coach' ? 'assistant' : 'user', text: String(m.text || '') }))
+    .slice(-10);
 }
 
 export function registerAiRoutes(app, { requireAuth, habitForUser }) {
   // Chat — free for all users.
   app.post('/api/ai/chat', requireAuth, async (req, res) => {
-    const { habitId, message, seed } = req.body || {};
+    const { habitId, message, seed, history } = req.body || {};
     const habit = habitForUser(Number(habitId), req.user.id);
     if (!habit) return res.status(404).json({ error: 'Habit not found.' });
     if (!message || !String(message).trim()) {
@@ -44,7 +57,10 @@ export function registerAiRoutes(app, { requireAuth, habitForUser }) {
     }
     const ctx = { ...buildCoachCtx(habit), seed: Number(seed) || 0 };
     try {
-      const text = await chat(buildMessages(message, ctx));
+      const memory = loadMemory(db, req.user.id, habit.id);
+      const memoryPrompt = memoryToPrompt(memory);
+      const text = await chat(buildMessages(message, ctx, historyFromBody({ history }), memoryPrompt));
+      saveMemory(db, req.user.id, habit.id, message);
       res.json({ text, quickReplies: [] });
     } catch (e) {
       console.error('AI chat error:', e.message);
@@ -53,17 +69,18 @@ export function registerAiRoutes(app, { requireAuth, habitForUser }) {
     }
   });
 
-  // Chat with real-time streaming — premium only. Uses real AI when available,
-  // falls back to offline word-by-word streaming on failure.
+  // Chat with real-time streaming — free for all users.
   app.post('/api/ai/chat/stream', requireAuth, (req, res) => {
-    const { habitId, message, seed } = req.body || {};
+    const { habitId, message, seed, history } = req.body || {};
     const habit = habitForUser(Number(habitId), req.user.id);
     if (!habit) return res.status(404).json({ error: 'Habit not found.' });
     if (!message || !String(message).trim()) {
       return res.status(400).json({ error: 'Message cannot be empty.' });
     }
     const ctx = { ...buildCoachCtx(habit), seed: Number(seed) || 0 };
-    const messages = buildMessages(message, ctx);
+    const memory = loadMemory(db, req.user.id, habit.id);
+    const memoryPrompt = memoryToPrompt(memory);
+    const messages = buildMessages(message, ctx, historyFromBody({ history }), memoryPrompt);
 
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
@@ -89,9 +106,11 @@ export function registerAiRoutes(app, { requireAuth, habitForUser }) {
           send({ done: true, quickReplies: [] });
           res.end();
         });
+        saveMemory(db, req.user.id, habit.id, message);
       } catch (e) {
         console.error('AI stream error:', e.message);
         if (!closed) {
+          saveMemory(db, req.user.id, habit.id, message);
           const reply = coachReply(message, ctx);
           const words = reply.text.split(/(\s+)/);
           let i = 0;
@@ -99,7 +118,7 @@ export function registerAiRoutes(app, { requireAuth, habitForUser }) {
             if (closed || i >= words.length) {
               clearInterval(timer);
               if (!closed && i >= words.length) {
-                send({ done: true, quickReplies: reply.quickReplies || [] });
+                send({ done: true, quickReplies: reply.quickReplies || [], fallback: true });
                 res.end();
               }
               return;
@@ -123,7 +142,7 @@ export function registerAiRoutes(app, { requireAuth, habitForUser }) {
     res.json({ text: reflectOnJournal(String(content), buildCoachCtx(habit)) });
   });
 
-  // Urge insights — premium only.
+  // Urge insights — free.
   app.post('/api/ai/urge-insights', requireAuth, (req, res) => {
     const { habitId } = req.body || {};
     const habit = habitForUser(Number(habitId), req.user.id);
@@ -132,7 +151,7 @@ export function registerAiRoutes(app, { requireAuth, habitForUser }) {
     res.json({ insight: urgeInsight(ctx.urges, ctx) });
   });
 
-  // Journal search — premium only. Finds relevant past entries via FTS so the
+  // Journal search — free. Finds relevant past entries via FTS so the
   // "AI" can ground its replies in the user's own history.
   app.post('/api/ai/journal-search', requireAuth, (req, res) => {
     const { habitId, query } = req.body || {};

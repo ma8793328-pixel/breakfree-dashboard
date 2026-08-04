@@ -1,0 +1,6 @@
+﻿*.db binary
+*.sqlite binary
+*.sqlite.bak binary
+*.db-journal binary
+*.db-wal binary
+*.db-shm binary

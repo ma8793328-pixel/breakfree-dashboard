@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "wrangler dev --port 8787",
     "deploy": "wrangler deploy",
+    "test": "vitest run",
     "d1:migrate": "wrangler d1 execute breakfree --file=./migrations/0001_init.sql --remote",
     "d1:local": "wrangler d1 execute breakfree --local --file=./migrations/0001_init.sql",
     "typecheck": "node --check src/index.js"
@@ -19,6 +20,7 @@
     "jose": "^6.2.7"
   },
   "devDependencies": {
+    "vitest": "^4.1.10",
     "wrangler": "^4.118.0"
   }
 }

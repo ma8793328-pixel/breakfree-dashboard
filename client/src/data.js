@@ -71,16 +71,16 @@ export function randomPrompt(except) {
 
 // ---------- Habit classification ----------
 
-const NICOTINE_WORDS  = /\b(smok|vap|nic|tobacco|cig|e-?cig|juul|snus)\b/i;
-const ALCOHOL_WORDS   = /\b(alc|beer|wine|vodka|whiskey|drink|sober|booze|liquor)\b/i;
-const CAFFEINE_WORDS  = /\b(caff|coffee|tea|espresso|latte|mocha|brew|decaf)\b/i;
-const CANNABIS_WORDS  = /\b(weed|marijuana|cannabis|pot|ganja|blunt|joint|thc|cbd)\b/i;
-const GAMBLING_WORDS  = /\b(bet|gambl|poker|casino|slot|wager|lottery|sportsbook)\b/i;
-const PORN_WORDS      = /\b(porn|xxx|nsfw|masturbat|onlyfan|hentai|explici)\b/i;
-const SOCIAL_WORDS    = /\b(instagram|tiktok|snapchat|twitter|facebook|scroll|reels|social)\b/i;
-const SHOPPING_WORDS  = /\b(shop|spend|retail|amazon|purchas|binge.?buy|sale|cart)\b/i;
-const GAMING_WORDS    = /\b(game|gamer|playstation|xbox|steam|twitch|esport)\b/i;
-const SUGAR_WORDS     = /\b(sugar|sweet|chocolate|candy|donut|junk.?food|dessert|soda|pop)\b/i;
+const NICOTINE_WORDS  = /\b(smok\w*|vap\w*|nic\w*|tobacco\w*|cig\w*|e-?cig\w*|juul\w*|snus\w*)\b/i;
+const ALCOHOL_WORDS   = /\b(alc\w*|beer\w*|wine\w*|vodka\w*|whiskey\w*|drink\w*|sober\w*|booze\w*|liquor\w*)\b/i;
+const CAFFEINE_WORDS  = /\b(caff\w*|coffee\w*|teas?\b|espresso\w*|latte\w*|mocha\w*|brew\w*|decaf\w*)\b/i;
+const CANNABIS_WORDS  = /\b(weed\w*|marijuana\w*|cannabis\w*|pot\b|ganja\w*|blunt\w*|joint\w*|thc|cbd)\b/i;
+const GAMBLING_WORDS  = /\b(bets?\b|bettin\w*|gambl\w*|poker\w*|casino\w*|slots?\b|wager\w*|lottery\w*|sportsbook\w*)\b/i;
+const PORN_WORDS      = /\b(porn\w*|xxx|nsfw|masturbat\w*|onlyfan\w*|hentai\w*|explicit\w*)\b/i;
+const SOCIAL_WORDS    = /\b(instagram\w*|tiktok\w*|snapchat\w*|twitter\w*|facebook\w*|scroll\w*|reels\w*|social\w*)\b/i;
+const SHOPPING_WORDS  = /\b(shop\w*|spend\w*|retail\w*|amazon\w*|purchas\w*|binge.?buy\w*|sales?\b|cart\w*)\b/i;
+const GAMING_WORDS    = /\b(gam\w*|playstation\w*|xbox\w*|steam\w*|twitch\w*|esport\w*)\b/i;
+const SUGAR_WORDS     = /\b(sugar\w*|sweet\w*|chocolate\w*|candy\w*|donut\w*|junk.?food\w*|dessert\w*|soda\w*|pops?\b)\b/i;
 
 export function classifyHabit(name) {
   const n = String(name || '');

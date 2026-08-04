@@ -57,18 +57,23 @@ export async function verifyPassword(password, stored) {
   return got === want;
 }
 
-export async function signToken(user, secret, expiresSec = 60 * 60 * 24 * 365) {
-  return new SignJWT({ role: user.role, email: user.email })
+export async function signToken(user, secret, expiresSec = 60 * 60 * 24 * 365, claims = {}) {
+  const jwt = new SignJWT({ role: user.role, email: user.email })
     .setProtectedHeader({ alg: 'HS256' })
     .setSubject(String(user.id))
     .setIssuedAt()
-    .setExpirationTime(`${Math.floor(expiresSec)}s`)
-    .sign(enc.encode(secret));
+    .setExpirationTime(`${Math.floor(expiresSec)}s`);
+  if (claims.issuer) jwt.setIssuer(claims.issuer);
+  if (claims.audience) jwt.setAudience(claims.audience);
+  return jwt.sign(enc.encode(secret));
 }
 
-export async function verifyToken(token, secret) {
+export async function verifyToken(token, secret, claims = {}) {
   try {
-    const { payload } = await jwtVerify(token, enc.encode(secret));
+    const options = {};
+    if (claims.issuer) options.issuer = claims.issuer;
+    if (claims.audience) options.audience = claims.audience;
+    const { payload } = await jwtVerify(token, enc.encode(secret), options);
     return { id: Number(payload.sub), email: payload.email || '', role: payload.role || 'user' };
   } catch {
     return null;

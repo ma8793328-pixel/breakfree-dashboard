@@ -221,6 +221,21 @@ db.exec(`
     UNIQUE (user_id, kind)
   );
 
+  CREATE TABLE IF NOT EXISTS coach_memories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    habit_id INTEGER NOT NULL REFERENCES habits(id) ON DELETE CASCADE,
+    topics TEXT NOT NULL DEFAULT '[]',
+    follow_ups TEXT NOT NULL DEFAULT '[]',
+    mood_trend TEXT NOT NULL DEFAULT 'stable',
+    last_topic TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  -- UNIQUE so saveMemory's ON CONFLICT(user_id, habit_id) upsert works.
+  DROP INDEX IF EXISTS idx_coach_memories_user_habit;
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_coach_memories_user_habit ON coach_memories(user_id, habit_id);
+
   CREATE INDEX IF NOT EXISTS idx_habits_user ON habits(user_id);
   CREATE INDEX IF NOT EXISTS idx_checkins_habit ON checkins(habit_id);
   CREATE INDEX IF NOT EXISTS idx_urges_habit ON urges(habit_id);
@@ -258,6 +273,9 @@ try {
   }
   if (!usersCols.some((c) => c.name === 'buddy_opt_in')) {
     db.exec('ALTER TABLE users ADD COLUMN buddy_opt_in INTEGER NOT NULL DEFAULT 0');
+  }
+  if (!usersCols.some((c) => c.name === 'api_key')) {
+    db.exec('ALTER TABLE users ADD COLUMN api_key TEXT');
   }
 } catch (e) {
   console.error('Migration warning (users):', e.message);
@@ -368,7 +386,7 @@ try {
 // Seed the community with a system account + starter posts so it's never empty.
 try {
   const seedUser = db
-    .prepare("INSERT OR IGNORE INTO users (email, password_hash, role, username) VALUES ('community@breakfree.app', 'seed:disabled-login', 'user', 'BreakFree')")
+      .prepare("INSERT OR IGNORE INTO users (email, password_hash, role, username, api_key) VALUES ('community@breakfree.app', 'seed:disabled-login', 'user', 'BreakFree', NULL)")
     .run();
   const community = db.prepare("SELECT id FROM users WHERE email = 'community@breakfree.app'").get();
   if (community) {

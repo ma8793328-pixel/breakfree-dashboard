@@ -29,6 +29,32 @@ function avg(series) {
   return series.reduce((s, v) => s + v, 0) / series.length;
 }
 
+// Compact dependency-free SVG line for a numeric series (urge counts, etc.).
+export function Sparkline({ values, width = 200, height = 56, color = 'var(--accent)', strokeWidth = 2 }) {
+  if (!values || values.length === 0) {
+    return <div className="muted small">No data yet.</div>;
+  }
+  const vw = 200;
+  const vh = 56;
+  const pad = 4;
+  const max = Math.max(...values, 1);
+  const min = Math.min(...values, 0);
+  const range = max - min || 1;
+  const step = (vw - pad * 2) / Math.max(values.length - 1, 1);
+  const path = values
+    .map((v, i) => {
+      const x = pad + i * step;
+      const y = pad + (vh - pad * 2) * (1 - (v - min) / range);
+      return `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(' ');
+  return (
+    <svg viewBox={`0 0 ${vw} ${vh}`} width={width} height={height} role="img" aria-label="trend sparkline">
+      <polyline points={path} fill="none" stroke={color} strokeWidth={strokeWidth} strokeLinejoin="round" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 export default function TrendChart({ data, metrics = METRICS, height = H }) {
   const days = data || [];
   const nonEmpty = metrics.filter((m) => days.some((d) => d[m.key] != null));
