@@ -136,6 +136,7 @@ db.exec(`
     habit_name TEXT,
     streak INTEGER,
     badge INTEGER,
+    is_seed INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
 
@@ -310,6 +311,15 @@ try {
   }
 } catch (e) {
   console.error('Migration warning (subscriptions):', e.message);
+}
+
+try {
+  const postCols = db.prepare('PRAGMA table_info(community_posts)').all();
+  if (!postCols.some((c) => c.name === 'is_seed')) {
+    db.exec('ALTER TABLE community_posts ADD COLUMN is_seed INTEGER NOT NULL DEFAULT 0');
+  }
+} catch (e) {
+  console.error('Migration warning (community_posts):', e.message);
 }
 
 try {

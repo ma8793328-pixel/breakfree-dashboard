@@ -87,6 +87,42 @@ function HealingChart() {
   );
 }
 
+function CommunityPreview() {
+  const [posts, setPosts] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/community/posts/public')
+      .then((r) => r.ok ? r.json() : { posts: [] })
+      .then((d) => { if (!cancelled) { setPosts(d.posts || []); setLoading(false); } })
+      .catch(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, []);
+
+  if (loading) return <p className="muted small">Loading community stories...</p>;
+  if (posts.length === 0) {
+    return (
+      <div className="landing-testimonials-soon">
+        <p className="landing-sub landing-sub-narrow">Be the first to share your journey.</p>
+        <Link className="btn btn-primary" to="/signup">Start your story</Link>
+      </div>
+    );
+  }
+  return (
+    <div className="landing-grid landing-grid-3">
+      {posts.map((p) => (
+        <figure className="landing-testimonial" key={p.id}>
+          <blockquote>{p.content}</blockquote>
+          <figcaption>
+            {p.author} {p.habit_name ? `· ${p.habit_name}` : ''} {p.streak ? `· ${p.streak}d` : ''}
+          </figcaption>
+        </figure>
+      ))}
+    </div>
+  );
+}
+
 export default function LandingPage() {
   const [shareTotal, setShareTotal] = useState(null);
 
@@ -251,13 +287,8 @@ export default function LandingPage() {
       </section>
 
       <section className="landing-section" id="testimonials">
-        <h2 className="landing-h2">Real stories are on the way</h2>
-        <div className="landing-testimonials-soon">
-          <p className="landing-sub landing-sub-narrow">
-            Your story could save someone else. Be the first to share yours.
-          </p>
-          <Link className="btn btn-primary" to="/signup">Share your story</Link>
-        </div>
+        <h2 className="landing-h2">From the community</h2>
+        <CommunityPreview />
       </section>
 
       <section className="landing-section" id="why">

@@ -30,6 +30,28 @@ function ensureUsername(userId) {
   return 'Anonymous';
 }
 
+const SEED_POSTS = [
+  { author: 'CalmRiver42', habit: 'Nicotine', streak: 7, content: 'Day 7 clean. The wall was real but I\'m through it. If you\'re on day 3 or 4 right now — I see you, keep going.' },
+  { author: 'SteadyOak77', habit: 'Caffeine', streak: 14, content: 'Resisted an urge at 3pm — the 10-minute delay worked again. By the time the timer went off the craving was gone.' },
+  { author: 'NewStart2026', habit: 'Scrolling', streak: 1, content: 'Day 1 again. This time I\'m asking for help instead of doing it alone. Hi everyone.' },
+  { author: 'QuietPine91', habit: 'Alcohol', streak: 30, content: 'One month. I didn\'t think I could get here. Sleep is better, mornings are mine again.' },
+  { author: 'BraveLark55', habit: 'Gaming', streak: 5, content: 'Day 5 — replaced the evening gaming session with a walk. The first few days were rough but it\'s getting easier.' },
+  { author: 'HopefulFern33', habit: 'Sugar', streak: 10, content: 'Ten days without the afternoon sugar crash. Energy is steadier and I don\'t crash at 4pm anymore.' },
+];
+
+function seedCommunityPosts() {
+  const existing = db.prepare('SELECT COUNT(*) AS c FROM community_posts WHERE is_seed = 1').get();
+  if (existing.c > 0) return;
+  for (const post of SEED_POSTS) {
+    let userId = db.prepare('SELECT id FROM users WHERE username = ?').get(post.author)?.id;
+    if (!userId) {
+      const info = db.prepare('INSERT INTO users (username, email, password_hash) VALUES (?, ?, ?)').run(post.author, `${post.author.toLowerCase()}@seed.local`, 'seed');
+      userId = info.lastInsertRowid;
+    }
+    db.prepare('INSERT INTO community_posts (user_id, content, habit_name, streak, is_seed) VALUES (?, ?, ?, ?, 1)').run(userId, post.content, post.habit, post.streak);
+  }
+}
+
 function communityPosts(userId, feed, limit, offset) {
   const following = feed === 'following';
   const blocked = db
@@ -49,6 +71,7 @@ function communityPosts(userId, feed, limit, offset) {
                   (SELECT COUNT(*) FROM community_comments c WHERE c.post_id = p.id) AS comment_count
            FROM community_posts p JOIN users u ON u.id = p.user_id
            WHERE (p.user_id IN (SELECT following_id FROM community_follows WHERE follower_id = ?) OR p.user_id = ?)
+             AND p.is_seed = 0
              AND ${blockedIn}
            ORDER BY p.created_at DESC, p.id DESC LIMIT ? OFFSET ?`
         )
@@ -59,7 +82,8 @@ function communityPosts(userId, feed, limit, offset) {
                   COALESCE(u.username, 'Anonymous') AS author_username,
                   (SELECT COUNT(*) FROM community_comments c WHERE c.post_id = p.id) AS comment_count
            FROM community_posts p JOIN users u ON u.id = p.user_id
-           WHERE ${blockedIn}
+           WHERE p.is_seed = 0
+             AND ${blockedIn}
            ORDER BY p.created_at DESC, p.id DESC LIMIT ? OFFSET ?`
         )
         .all(...blockedIds, limit, offset);
@@ -139,6 +163,20 @@ export function registerCommunityRoutes(app, { requireAuth, requireAdmin, habitF
     const limit = Math.min(Number(req.query.limit) || 50, 100);
     const offset = Math.max(Number(req.query.offset) || 0, 0);
     res.json({ posts: communityPosts(req.user.id, feed, limit, offset) });
+  });
+
+  app.get('/api/community/posts/public', (req, res) => {
+    const limit = Math.min(Number(req.query.limit) || 3, 10);
+    const rows = db
+      .prepare(
+        `SELECT p.id, p.content, p.habit_name, p.streak, p.created_at,
+                COALESCE(u.username, 'Anonymous') AS author
+         FROM community_posts p JOIN users u ON u.id = p.user_id
+         WHERE p.is_seed = 0
+         ORDER BY p.created_at DESC, p.id DESC LIMIT ?`
+      )
+      .all(limit);
+    res.json({ posts: rows.map((r) => ({ ...r, relativeTime: relativeTime(r.created_at) })) });
   });
 
   app.post('/api/community/posts', requireAuth, (req, res) => {
@@ -423,4 +461,6 @@ export function registerCommunityRoutes(app, { requireAuth, requireAdmin, habitF
     db.prepare('UPDATE users SET buddy_opt_in = ? WHERE id = ?').run(optedIn ? 1 : 0, req.user.id);
     res.json({ optedIn });
   });
+
+  seedCommunityPosts();
 }
