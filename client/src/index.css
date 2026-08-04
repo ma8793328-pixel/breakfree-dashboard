@@ -332,6 +332,18 @@ a {
   color: var(--accent);
 }
 
+@media (max-width: 360px) {
+  .bottom-nav a,
+  .quick-exit-btn {
+    font-size: 10px;
+  }
+  .bottom-nav a svg,
+  .quick-exit-btn svg {
+    width: 20px;
+    height: 20px;
+  }
+}
+
 /* ---------- Streak card ---------- */
 
 .streak-card {
@@ -1427,6 +1439,24 @@ a {
   align-items: center;
   justify-content: center;
   position: relative;
+}
+
+@media (max-width: 380px) {
+  .rating-controls {
+    gap: 8px;
+  }
+  .rating-buttons {
+    gap: 8px;
+  }
+  .rating-btn {
+    width: 32px;
+    height: 32px;
+    font-size: 12px;
+  }
+  .scale-label {
+    font-size: 11px;
+    min-width: 24px;
+  }
 }
 
 .rating-btn:active {
