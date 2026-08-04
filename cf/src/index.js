@@ -5,9 +5,7 @@ import { cors } from 'hono/cors';
 import { computeStats, BADGE_THRESHOLDS, todayKey, dateKey, addDays } from './stats.js';
 import { hashPassword, verifyPassword, signToken, verifyToken, randomHex } from './auth.js';
 import { registerAiRoutes } from './ai.js';
-import { buildReport, buildRecoveryPlan } from './premium.js';
 import { sendPush, loadOrCreateVapid } from './push.js';
-import { createCheckout, retrieveSession, cancelStripeSubscription, verifyWebhookSignature } from './stripe.js';
 import { findNearby, geocodeArea, GENERIC_IDEAS } from './daysout.js';
 import { evaluateUserEngagement, evaluateAllEngagement } from './engage.js';
 import { checkHealth as checkOpenAI } from './openai.js';
@@ -19,10 +17,6 @@ function wallInfo(stats) {
   const day = stats?.currentStreak || 0;
   return { active: day >= 3 && day <= 7, day };
 }
-
-const PRICE_CENTS = 499;
-const FREE_HABIT_LIMIT = 1;
-const BILLING_DAYS = 30;
 
 const app = new Hono();
 app.use('/api/*', cors());
@@ -278,11 +272,6 @@ app.post('/api/auth/signup', async (c) => {
   const hash = await hashPassword(password);
   const info = await c.env.DB.prepare('INSERT INTO users (email, password_hash) VALUES (?, ?)').bind(em, hash).run();
   const user = { id: Number(info.meta.last_row_id), email: em, role: 'user' };
-  await c.env.DB.prepare(
-    `INSERT INTO subscriptions (user_id, plan, status, started_at, renews_at)
-     VALUES (?, 'premium', 'trial', datetime('now'), datetime('now', '+7 days'))
-     ON CONFLICT(user_id) DO NOTHING`
-  ).bind(user.id).run();
   const token = await signToken(user, c.env.JWT_SECRET);
   try {
     const cfTz = c.req.raw.cf?.timezone || c.req.cf?.timezone;
@@ -373,115 +362,6 @@ app.get('/api/auth/me', async (c) => {
   const user = await c.env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(u.id).first();
   if (!user) return c.json({ error: 'User not found.' }, 404);
   return c.json({ user: publicUser(user) });
-});
-
-// ---------- subscription (Stripe checkout, with simulated fallback) ----------
-async function activateSubscription(env, userId, stripe) {
-  const customerId = stripe?.customer || null;
-  const subId = stripe?.subscription || null;
-  await env.DB.prepare(
-    `INSERT INTO subscriptions (user_id, plan, status, started_at, renews_at, stripe_customer_id, stripe_subscription_id)
-     VALUES (?, 'premium', 'active', datetime('now'), datetime('now', ?), ?, ?)
-     ON CONFLICT(user_id) DO UPDATE SET plan = 'premium', status = 'active', started_at = datetime('now'), renews_at = datetime('now', ?), stripe_customer_id = coalesce(?, stripe_customer_id), stripe_subscription_id = coalesce(?, stripe_subscription_id)`
-  ).bind(userId, `+${BILLING_DAYS} days`, customerId, subId, `+${BILLING_DAYS} days`, customerId, subId).run();
-}
-
-function stripeConfigured(env) {
-  return Boolean(env.STRIPE_SECRET_KEY);
-}
-
-app.get('/api/subscription', async (c) => {
-  const u = userOf(c);
-  if (!u) return c.json({ error: 'Not authenticated' }, 401);
-  const row = await c.env.DB.prepare('SELECT plan, status, started_at, renews_at FROM subscriptions WHERE user_id = ?').bind(u.id).first();
-  const active = row?.plan === 'premium' && row?.status === 'active';
-  return c.json({
-    subscription: {
-      plan: row?.plan || 'free',
-      status: row?.status || 'free',
-      active,
-      trial: false,
-      habitLimit: Infinity,
-      startedAt: row?.started_at || null,
-      renewsAt: row?.renews_at || null,
-    },
-    price: PRICE_CENTS,
-  });
-});
-
-app.post('/api/subscription/checkout', async (c) => {
-  const u = userOf(c);
-  if (!u) return c.json({ error: 'Not authenticated' }, 401);
-  await activateSubscription(c.env, u.id);
-  const sub = await c.env.DB.prepare('SELECT plan, status, renews_at FROM subscriptions WHERE user_id = ?').bind(u.id).first();
-  return c.json({ alreadyPremium: true, subscription: sub });
-});
-
-app.post('/api/subscription/complete', async (c) => {
-  const u = userOf(c);
-  if (!u) return c.json({ error: 'Not authenticated' }, 401);
-  const { sessionId } = await c.req.json().catch(() => ({}));
-  if (!sessionId || !String(sessionId).trim()) return c.json({ error: 'Missing session ID.' }, 400);
-
-  if (stripeConfigured(c.env)) {
-    // Verify the payment actually completed on Stripe before granting Premium.
-    try {
-      const s = await retrieveSession(c.env, String(sessionId));
-      if (s.payment_status !== 'paid') return c.json({ error: 'Payment has not completed yet.' }, 400);
-      if (s.client_reference_id !== String(u.id)) return c.json({ error: 'Session does not match this account.' }, 403);
-      await activateSubscription(c.env, u.id, s);
-      return c.json({ ok: true });
-    } catch (e) {
-      return c.json({ error: String(e.message || 'Could not verify the payment.') }, 502);
-    }
-  }
-
-  const session = await c.env.DB.prepare('SELECT * FROM checkout_sessions WHERE id = ? AND user_id = ?').bind(String(sessionId), u.id).first();
-  if (!session) return c.json({ error: 'Checkout session not found.' }, 400);
-  if (session.status !== 'pending') return c.json({ error: 'Checkout session is not pending.' }, 400);
-  await c.env.DB.prepare("UPDATE checkout_sessions SET status = 'completed', completed_at = datetime('now') WHERE id = ?").bind(session.id).run();
-  await activateSubscription(c.env, u.id, null);
-  return c.json({ ok: true });
-});
-
-app.post('/api/subscription/cancel', async (c) => {
-  const u = userOf(c);
-  if (!u) return c.json({ error: 'Not authenticated' }, 401);
-  if (stripeConfigured(c.env)) {
-    const row = await c.env.DB.prepare('SELECT stripe_subscription_id FROM subscriptions WHERE user_id = ? AND plan = ? AND status = ?').bind(u.id, 'premium', 'active').first();
-    if (row?.stripe_subscription_id) await cancelStripeSubscription(c.env, row.stripe_subscription_id);
-  }
-  await c.env.DB.prepare("UPDATE subscriptions SET status = 'cancelled' WHERE user_id = ? AND plan = 'premium'").bind(u.id).run();
-  return c.json({ ok: true });
-});
-
-// Stripe webhook: activate on checkout completion, downgrade on cancel.
-app.post('/api/stripe/webhook', async (c) => {
-  const rawBody = await c.req.text();
-  const sig = c.req.header('stripe-signature');
-  const okSig = await verifyWebhookSignature(c.env, rawBody, sig);
-  if (!okSig) return c.json({ error: 'Invalid signature.' }, 400);
-  const event = JSON.parse(rawBody);
-  try {
-    if (event.type === 'checkout.session.completed') {
-      const s = event.data.object;
-      const userId = Number(s.client_reference_id);
-      if (userId && s.payment_status === 'paid') {
-        await activateSubscription(c.env, userId, { customer: s.customer, subscription: s.subscription });
-      }
-    } else if (event.type === 'customer.subscription.deleted') {
-      const sub = event.data.object;
-      if (sub?.metadata?.user_id) {
-        const uid = Number(sub.metadata.user_id);
-        await c.env.DB.prepare("UPDATE subscriptions SET status = 'cancelled' WHERE user_id = ?").bind(uid).run();
-      } else {
-        await c.env.DB.prepare('UPDATE subscriptions SET status = ? WHERE stripe_subscription_id = ?').bind('cancelled', sub.id).run();
-      }
-    }
-  } catch (e) {
-    console.error('webhook handler failed:', e.message);
-  }
-  return c.json({ received: true });
 });
 
 // ---------- habits ----------
@@ -890,6 +770,28 @@ async function ensureUsername(env, userId) {
   return 'Anonymous';
 }
 
+const SEED_POSTS = [
+  { author: 'CalmRiver42', habit: 'Nicotine', streak: 7, content: 'Day 7 clean. The wall was real but I\'m through it. If you\'re on day 3 or 4 right now — I see you, keep going.' },
+  { author: 'SteadyOak77', habit: 'Caffeine', streak: 14, content: 'Resisted an urge at 3pm — the 10-minute delay worked again. By the time the timer went off the craving was gone.' },
+  { author: 'NewStart2026', habit: 'Scrolling', streak: 1, content: 'Day 1 again. This time I\'m asking for help instead of doing it alone. Hi everyone.' },
+  { author: 'QuietPine91', habit: 'Alcohol', streak: 30, content: 'One month. I didn\'t think I could get here. Sleep is better, mornings are mine again.' },
+  { author: 'BraveLark55', habit: 'Gaming', streak: 5, content: 'Day 5 — replaced the evening gaming session with a walk. The first few days were rough but it\'s getting easier.' },
+  { author: 'HopefulFern33', habit: 'Sugar', streak: 10, content: 'Ten days without the afternoon sugar crash. Energy is steadier and I don\'t crash at 4pm anymore.' },
+];
+
+async function seedCommunityPosts(env) {
+  const existing = await env.DB.prepare('SELECT COUNT(*) AS n FROM community_posts WHERE is_seed = 1').first();
+  if (Number(existing?.n || 0) > 0) return;
+  for (const post of SEED_POSTS) {
+    let userId = await env.DB.prepare('SELECT id FROM users WHERE username = ?').bind(post.author).first();
+    if (!userId) {
+      const info = await env.DB.prepare('INSERT INTO users (username, email, password_hash) VALUES (?, ?, ?)').bind(post.author, `${post.author.toLowerCase()}@seed.local`, 'seed').run();
+      userId = { id: Number(info.meta.last_row_id) };
+    }
+    await env.DB.prepare('INSERT INTO community_posts (user_id, content, habit_name, streak, is_seed) VALUES (?, ?, ?, ?, 1)').bind(userId.id, post.content, post.habit, post.streak).run();
+  }
+}
+
 async function communityPosts(env, userId, feed, limit, offset) {
   const following = feed === 'following';
   const blocked = (await env.DB.prepare(
@@ -907,18 +809,20 @@ async function communityPosts(env, userId, feed, limit, offset) {
               (SELECT COUNT(*) FROM community_comments c WHERE c.post_id = p.id) AS comment_count
        FROM community_posts p JOIN users u ON u.id = p.user_id
        WHERE (p.user_id IN (SELECT following_id FROM community_follows WHERE follower_id = ?) OR p.user_id = ?)
+         AND p.is_seed = 0
          AND ${blockedIn}
        ORDER BY p.created_at DESC, p.id DESC LIMIT ? OFFSET ?`
-    ).bind(userId, userId, ...blockedIds, limit, offset).all()).results;
+     ).bind(userId, userId, ...blockedIds, limit, offset).all()).results;
   } else {
     rows = (await env.DB.prepare(
       `SELECT p.id, p.user_id, p.content, p.habit_name, p.streak, p.badge, p.created_at,
               COALESCE(u.username, 'Anonymous') AS author_username,
               (SELECT COUNT(*) FROM community_comments c WHERE c.post_id = p.id) AS comment_count
        FROM community_posts p JOIN users u ON u.id = p.user_id
-       WHERE ${blockedIn}
+       WHERE p.is_seed = 0
+         AND ${blockedIn}
        ORDER BY p.created_at DESC, p.id DESC LIMIT ? OFFSET ?`
-    ).bind(...blockedIds, limit, offset).all()).results;
+     ).bind(...blockedIds, limit, offset).all()).results;
   }
   if (rows.length === 0) return [];
   const ids = rows.map((r) => r.id);
@@ -982,6 +886,19 @@ app.get('/api/community/posts', async (c) => {
   const limit = Math.min(Number(q.get('limit')) || 50, 100);
   const offset = Math.max(Number(q.get('offset')) || 0, 0);
   return c.json({ posts: await communityPosts(c.env, u.id, feed, limit, offset) });
+});
+
+app.get('/api/community/posts/public', async (c) => {
+  const q = new URL(c.req.url).searchParams;
+  const limit = Math.min(Number(q.get('limit')) || 3, 10);
+  const rows = (await c.env.DB.prepare(
+    `SELECT p.id, p.content, p.habit_name, p.streak, p.created_at,
+            COALESCE(u.username, 'Anonymous') AS author
+     FROM community_posts p JOIN users u ON u.id = p.user_id
+     WHERE p.is_seed = 0
+     ORDER BY p.created_at DESC, p.id DESC LIMIT ?`
+   ).bind(limit).all()).results;
+  return c.json({ posts: rows.map((r) => ({ ...r })) });
 });
 
 app.post('/api/community/posts', async (c) => {
@@ -1452,26 +1369,6 @@ app.delete('/api/me', async (c) => {
   return c.json({ ok: true });
 });
 
-// ---------- reports ----------
-app.post('/api/premium/report', async (c) => {
-  const u = userOf(c);
-  if (!u) return c.json({ error: 'Not authenticated' }, 401);
-  const { habitId, month } = await c.req.json().catch(() => ({}));
-  const habit = await habitOf(c.env, habitId, u.id);
-  if (!habit) return c.json({ error: 'Habit not found.' }, 404);
-  const m = /^\d{4}-\d{2}$/.test(month || '') ? month : todayKey().slice(0, 7);
-  return c.json({ report: await buildReport(c.env, habit, m) });
-});
-
-app.post('/api/premium/recovery-plan', async (c) => {
-  const u = userOf(c);
-  if (!u) return c.json({ error: 'Not authenticated' }, 401);
-  const { habitId } = await c.req.json().catch(() => ({}));
-  const habit = await habitOf(c.env, habitId, u.id);
-  if (!habit) return c.json({ error: 'Habit not found.' }, 404);
-  return c.json({ plan: await buildRecoveryPlan(c.env, habit) });
-});
-
 // ---------- admin ----------
 async function countsFor(env) {
   const tables = ['users', 'habits', 'checkins', 'urges', 'journals', 'badges', 'subscriptions', 'app_errors'];
@@ -1488,8 +1385,6 @@ app.get('/api/admin/status', async (c) => {
   if (!u) return c.json({ error: 'Not authenticated' }, 401);
   if (u.role !== 'admin') return c.json({ error: 'Admin access required.' }, 403);
   const counts = await countsFor(c.env);
-  const premium = await c.env.DB.prepare("SELECT COUNT(*) AS n FROM subscriptions WHERE plan = 'premium' AND status = 'active'").first();
-  const trials = await c.env.DB.prepare("SELECT COUNT(*) AS n FROM subscriptions WHERE plan = 'premium' AND status = 'trial'").first();
   const errors24h = await c.env.DB.prepare("SELECT COUNT(*) AS n FROM app_errors WHERE created_at > datetime('now', '-24 hours')").first();
   const metaRows = {};
   for (const r of (await c.env.DB.prepare("SELECT key, value FROM meta WHERE key IN ('nudges_last_run','nudges_last_sent','nudges_sent')").all()).results) {
@@ -1565,8 +1460,6 @@ app.get('/api/admin/status', async (c) => {
     uptime,
     startedAt: new Date(Date.now() - uptime * 1000).toISOString(),
     counts,
-    premiumUsers: Number(premium?.n || 0),
-    trialUsers: Number(trials?.n || 0),
     errors24h: Number(errors24h || 0),
     notifications,
     today: { checkins: todayCheckins, urges: todayUrges },
@@ -1845,28 +1738,6 @@ app.post('/api/admin/ai-check', async (c) => {
     void sendWebhookAlert(c.env, 'ai_check_failed', { failedChecks: failed, summary: 'AI health check failed' });
   }
   return c.json({ healthy, checks, summary: healthy ? 'All checks passed.' : 'Some checks failed.', suggestions: [] });
-});
-
-app.post('/api/admin/grant-premium', async (c) => {
-  const u = userOf(c);
-  if (!u) return c.json({ error: 'Not authenticated' }, 401);
-  if (u.role !== 'admin') return c.json({ error: 'Admin access required.' }, 403);
-  const { userId, days = 30 } = await c.req.json().catch(() => ({}));
-  const targetId = Number(userId);
-  if (!targetId) return c.json({ error: 'userId is required.' }, 400);
-  const target = await c.env.DB.prepare('SELECT id, email FROM users WHERE id = ?').bind(targetId).first();
-  if (!target) return c.json({ error: 'User not found.' }, 404);
-  await c.env.DB.prepare(
-    `INSERT INTO subscriptions (user_id, plan, status, started_at, renews_at)
-     VALUES (?, 'premium', 'active', datetime('now'), datetime('now', ?))
-     ON CONFLICT(user_id) DO UPDATE SET
-       plan = 'premium',
-       status = 'active',
-       started_at = datetime('now'),
-       renews_at = datetime('now', ?)`
-  ).bind(targetId, `+${days} days`, `+${days} days`).run();
-  const sub = await c.env.DB.prepare('SELECT plan, status, renews_at FROM subscriptions WHERE user_id = ?').bind(targetId).first();
-  return c.json({ ok: true, user: { id: target.id, email: target.email }, subscription: sub });
 });
 
 // ---------- admin user management ----------
@@ -2180,8 +2051,9 @@ export default {
     if (url.pathname.startsWith('/api/')) {
       try {
         await ensureAdmin(env); // lazily bootstraps the admin account
+        await seedCommunityPosts(env); // seed community posts on first boot
       } catch (e) {
-        console.error('ensureAdmin failed:', e.message);
+        console.error('boot failed:', e.message);
       }
     }
     return app.fetch(request, env, ctx);
