@@ -8,7 +8,7 @@
     "preinstall": "node --max-old-space-size=4096 -e \"console.log('preinstall: max-old-space-size=4096')\"",
     "prestart": "node scripts/check-secrets.cjs",
     "predeploy": "node scripts/check-secrets.cjs && powershell -ExecutionPolicy Bypass -File ./scripts/smoke-test.ps1 && node -e \"console.log('⏳ WAIT 10 MIN POST-DEPLOY BEFORE REVOKING STRIPE KEYS'); setInterval(()=>{},1000)\"",
-    "start": "chcp 65001 >nul && node index.js",
+    "start": "node index.js",
     "dev": "node --watch index.js",
     "migrate": "node scripts/run-migrations.cjs",
     "migrate:dry": "node scripts/run-migrations.cjs --dry-run",
